@@ -235,8 +235,9 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
-#ifndef _WIN32
-        // AMD's FSR 4 runtime is Windows-only.
+#if !defined(_WIN32) && !defined(LICHII_LINUX_FSR412_BEAMNG)
+        // Official signed FFX DLLs are Windows-only; Linux's community
+        // backend is available only in an explicitly enabled native build.
         if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             continue;
         }
@@ -357,6 +358,12 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             hold_graphics.emplace(setting->Id(), group);
 #endif
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+            // Native Linux uses an externally installed BeamNG-derived FSR
+            // 4.1.2 implementation. Never show AMD's Windows-DLL downloader.
+            amd_fsr4_group = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+#else
             // AMD's files and a download button under the checkbox, shown for GPUs FSR 4 runs on.
             amd_fsr4_group = new QWidget(this);
             QVBoxLayout* group_layout = new QVBoxLayout(amd_fsr4_group);
@@ -368,6 +375,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             panel->setVisible(widget->checkbox->isChecked());
             connect(widget->checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
             hold_graphics.emplace(setting->Id(), amd_fsr4_group);
+#endif
         } else if (setting->Id() == Settings::values.frame_gen.Id()) {
             frame_gen_checkbox = widget->checkbox;
             hold_graphics.emplace(setting->Id(), widget);
