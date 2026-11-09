@@ -17,7 +17,7 @@ First ensure the build dependencies for Lichii are installed, including CMake
 and the multimedia libraries listed in Lichii's build documentation.
 
 Keep the BeamNG source tree pinned to **v0.2.1** (commit
-`10791f325b66bff7413577c65c5aa7dfb`), the version used by this adapter:
+`10791f325b66bff7413577c65c5aa7df5ae67dfb`), the version used by this adapter:
 
 ```fish
 git clone https://github.com/remora24/Lichii.git
