@@ -200,7 +200,6 @@ add_library(video_core STATIC
     renderer_vulkan/vk_compute_pass.h
     renderer_vulkan/vk_fsr3_upscaler.cpp
     renderer_vulkan/vk_fsr3_upscaler.h
-    renderer_vulkan/vk_fsr4_upscaler.cpp
     renderer_vulkan/vk_fsr4_upscaler.h
     vulkan_common/ffx_files.h
     vulkan_common/ffx_runtime.cpp
@@ -366,6 +365,33 @@ add_library(video_core STATIC
     video_core.cpp
     video_core.h
 )
+
+
+# Experimental native Linux FSR 4.1.2 backend, based on BeamNG's independent Vulkan
+# implementation. Disabled by default until device-feature, depth and parity validation.
+option(ENABLE_LICHII_LINUX_FSR412 "Build experimental BeamNG-derived Linux FSR 4.1.2 backend" OFF)
+set(LICHII_BEAMNG_FSR412_ROOT "" CACHE PATH
+    "Checkout of Mob1K7105/beamng-fsr4-linux (v0.2.1), containing fsr411/ and assets/")
+if(ENABLE_LICHII_LINUX_FSR412)
+    if(NOT LINUX)
+        message(FATAL_ERROR "ENABLE_LICHII_LINUX_FSR412 is supported on Linux only")
+    endif()
+    if(NOT EXISTS "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp" OR
+       NOT EXISTS "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h")
+        message(FATAL_ERROR "Set LICHII_BEAMNG_FSR412_ROOT to a BeamNG FSR4 checkout (v0.2.1)")
+    endif()
+    find_package(Vulkan REQUIRED COMPONENTS Vulkan)
+    target_sources(video_core PRIVATE
+        renderer_vulkan/vk_fsr4_linux.cpp
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp"
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h"
+    )
+    target_include_directories(video_core PRIVATE "${LICHII_BEAMNG_FSR412_ROOT}/fsr411")
+    target_link_libraries(video_core PRIVATE Vulkan::Vulkan)
+    target_compile_definitions(video_core PRIVATE LICHII_LINUX_FSR412_BEAMNG=1)
+else()
+    target_sources(video_core PRIVATE renderer_vulkan/vk_fsr4_upscaler.cpp)
+endif()
 
 if (ENABLE_LSFG)
     target_sources(video_core PRIVATE
