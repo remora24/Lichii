@@ -24,8 +24,8 @@ git clone https://github.com/remora24/Lichii.git
 cd Lichii
 git switch feature/linux-fsr412-beamng
 cd ..
-git clone https://github.com/Mob1K7105/beamng-fsr4-linux.git
-git -C beamng-fsr4-linux switch --detach 10791f325b66bff7413577c65c5aa7dfb
+git clone --branch v0.2.1 --depth 1 https://github.com/Mob1K7105/beamng-fsr4-linux.git
+git -C beamng-fsr4-linux rev-parse HEAD
 cd Lichii
 cmake -S . -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
