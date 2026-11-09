@@ -1896,8 +1896,9 @@ void Device::RemoveUnsuitableExtensions() {
     // explicitly selected at process startup. Core Lichii behavior is unchanged.
     bool want_native_fsr412 = false;
 #ifdef LICHII_LINUX_FSR412_BEAMNG
+    want_native_fsr412 = Settings::values.amd_fsr4.GetValue();
     if (const char* enabled = std::getenv("LICHII_FSR412_EXPERIMENTAL")) {
-        want_native_fsr412 = enabled[0] == '1' && enabled[1] == '\0';
+        want_native_fsr412 |= enabled[0] == '1' && enabled[1] == '\0';
     }
 #endif
     extensions.compute_shader_derivatives =
