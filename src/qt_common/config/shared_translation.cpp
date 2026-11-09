@@ -170,12 +170,22 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Replaces Ocarina of Time's native upscaler using scene depth and camera motion. "
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    INSERT(Settings, amd_fsr4, tr("Use native FSR 4.1.2 (Linux, experimental)"),
+           tr("Uses an unofficial INT8 FSR 4.1.2 Vulkan implementation in games "
+              "where AMD FSR 3.1 replaces the native upscaler (Ocarina of Time). "
+              "Requires supported AMD RADV and the shader/model asset directory: "
+              "set LICHII_FSR412_ASSETS_DIR before starting Lichii. "
+              "FSR 3.1 is used if FSR 4.1.2 cannot initialize. "
+              "Takes effect on the next game launch."));
+#else
     INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of FSR 3.1"),
            tr("Uses AMD's ML-based FSR 4 where FSR replaces a game's upscaler (Ocarina of Time "
               "with the setting above). Radeon RX 6000 or newer, or a Ryzen AI processor, with a "
               "current AMD driver.\nNeeds AMD's FidelityFX runtime, which Lichii downloads from "
               "AMD when you ask. The files are AMD's, under AMD's licence. Without them, or if FSR 4 "
               "can't run, FSR 3.1 is used. Takes effect when a game starts."));
+#endif
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
