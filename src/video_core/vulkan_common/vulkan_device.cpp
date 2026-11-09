@@ -1891,15 +1891,12 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
                                        VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
 
-    // The independent native Vulkan FSR 4.1.2 shaders use compute derivatives.
-    // Do not enable these extra driver features unless the Linux backend is
-    // explicitly selected at process startup. Core Lichii behavior is unchanged.
+    // In the opt-in Linux build, expose derivative features on AMD devices
+    // at device creation so that the graphics checkbox can be toggled before
+    // launching a game. The ordinary build never enables this extension.
     bool want_native_fsr412 = false;
 #ifdef LICHII_LINUX_FSR412_BEAMNG
-    want_native_fsr412 = Settings::values.amd_fsr4.GetValue();
-    if (const char* enabled = std::getenv("LICHII_FSR412_EXPERIMENTAL")) {
-        want_native_fsr412 |= enabled[0] == '1' && enabled[1] == '\0';
-    }
+    want_native_fsr412 = properties.properties.vendorID == 0x1002;
 #endif
     extensions.compute_shader_derivatives =
         extensions.compute_shader_derivatives && want_native_fsr412 &&
