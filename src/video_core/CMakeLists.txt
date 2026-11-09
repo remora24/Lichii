@@ -380,7 +380,7 @@ if(ENABLE_LICHII_LINUX_FSR412)
        NOT EXISTS "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h")
         message(FATAL_ERROR "Set LICHII_BEAMNG_FSR412_ROOT to a BeamNG FSR4 checkout (v0.2.1)")
     endif()
-    find_package(Vulkan REQUIRED COMPONENTS Vulkan)
+    find_package(Vulkan REQUIRED)
     target_sources(video_core PRIVATE
         renderer_vulkan/vk_fsr4_linux.cpp
         "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp"
