@@ -16,6 +16,12 @@
 #include "common/common_types.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+#ifdef LICHII_LINUX_FSR412_BEAMNG
+namespace Fsr411 {
+class Upscaler;
+}
+#endif
+
 namespace Vulkan {
 
 class Device;
@@ -80,6 +86,19 @@ private:
     void DestroyContext();
     void CreateOutput(VkExtent2D upscale_size);
     void CreateExposure();
+
+#ifdef LICHII_LINUX_FSR412_BEAMNG
+    // Cached views must outlive the submitted commands that reference them.
+    struct LinuxInputView {
+        VkImage image = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        vk::ImageView view;
+    };
+    std::unique_ptr<Fsr411::Upscaler> linux_upscaler;
+    LinuxInputView linux_color;
+    LinuxInputView linux_depth;
+    LinuxInputView linux_motion;
+#endif
 
     const Device& device;
     Scheduler& scheduler;
