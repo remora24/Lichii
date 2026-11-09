@@ -102,7 +102,8 @@ Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
     // The upstream BeamNG backend requires an enabled push-descriptor extension.
     // Mixed-float-dot is disabled here: use its portable prepass variant until
     // Vulkan extension/feature negotiation is added to Lichii's device creation.
-    if (vkGetDeviceProcAddr(*device.GetLogical(), "vkCmdPushDescriptorSetKHR") == nullptr) {
+    if (device.GetDispatchLoader().vkGetDeviceProcAddr(
+            *device.GetLogical(), "vkCmdPushDescriptorSetKHR") == nullptr) {
         LOG_WARNING(Render_Vulkan,
                     "Linux FSR 4.1.2: VK_KHR_push_descriptor not enabled; using FSR 3.1");
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
