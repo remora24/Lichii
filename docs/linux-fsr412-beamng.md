@@ -1,145 +1,133 @@
-# Experimental native Linux FSR 4.1.2 (BeamNG backend)
+# Native Linux FSR 4.1.2 — BeamNG-derived Vulkan backend
 
-This branch adds the first native Linux adapter to the **FSR 4.1.2 INT8** Vulkan
-implementation in [Mob1K7105/beamng-fsr4-linux](https://github.com/Mob1K7105/beamng-fsr4-linux).
-It does not use AMD's Windows FidelityFX runtime, Wine, or Proton.
+This development branch integrates the **INT8 FSR 4.1.2** Vulkan runtime from
+[Mob1K7105/beamng-fsr4-linux](https://github.com/Mob1K7105/beamng-fsr4-linux)
+into Lichii's Ocarina of Time upscaling path. It does not use AMD's Windows
+FidelityFX DLLs, Wine, or Proton.
 
-**STATUS: DEVELOPMENT ONLY — not visually correct, not performance-tested, and
-not yet suitable for an ordinary gaming session.** The default build, existing
-Windows FSR 4, Linux FSR 3.1 and all non-FSR paths remain unchanged.
+**Status: experimental, awaiting native build and on-device image validation.**
+The option is OFF by default. The regular Windows AMD FSR 4 integration and
+default Linux FSR 3.1 path are unchanged. Do not merge or release as stable
+without a successful native build and actual Radeon test.
 
-## Why it is disabled
+## Build on Arch Linux / CachyOS (fish shell)
 
-The BeamNG implementation assumes **reversed-Z depth**. Lichii's Ocarina FSR path
-currently provides **standard (forward) D32 depth**, and the native adapter does
-not yet convert it. Simply passing that image into BeamNG's backend can give
-incorrect reconstruction. Until a correct depth conversion/reuse strategy is
-implemented and checked against the reference, the constructor deliberately
-throws and Lichii falls back to FSR 3.1.
+First ensure the build dependencies for Lichii are installed, including CMake
+3.31+, Ninja, GCC/Clang, glslangValidator, Vulkan headers/loader, Qt6,
+and the multimedia libraries listed in Lichii's build documentation.
 
-The adapter also forces a GPU completion wait before every FSR 4 evaluation.
-This protects BeamNG's 8-slot, host-mapped constant-buffer ring and image-view
-lifetimes until Lichii's GPU-timeline ownership is integrated. It is not
-appropriate for performance benchmarking in this form.
-
-Do not interpret a successfully recorded compute dispatch as visual parity.
-
-## Source and assets
-
-The independent C++ implementation is external: we compile
-`fsr411/fsr411.cpp` from a checked-out copy of
-[Mob1K7105/beamng-fsr4-linux](https://github.com/Mob1K7105/beamng-fsr4-linux).
-Development is pinned to the **v0.2.1** source release (2026-11-05); use that
-version until changes are intentionally reviewed. The `assets/` directory
-contains the 4.1.2 INT8 SPIR-V/model sets. Lichii does not copy these files or
-automatically download/redistribute them.
-
-The BeamNG source is GPL-2.0-or-later, with attribution to its original
-authors (including the FSR-4.1.1-linux and bbport work). Lichii is
-GPL-3.0-or-later. The upstream project states that its derived AMD shader/model
-assets are subject to AMD's SDK 2.4 MIT exception and includes the associated
-notices. Preserve `assets/NOTICE.md`, `notices/AMD-SDK-LICENSE.md` and other
-required notices when redistributing the assets. This integration is unofficial
-and is not endorsed by AMD.
-
-## Build (Linux)
-
-Check out the external project at its pinned release, adjacent to Lichii:
+Keep the BeamNG source tree pinned to **v0.2.1** (commit
+`10791f325b66bff7413577c65c5aa7dfb`), the version used by this adapter:
 
 ```fish
-git clone https://github.com/Mob1K7105/beamng-fsr4-linux.git
-cd beamng-fsr4-linux
-git checkout v0.2.1
+git clone https://github.com/remora24/Lichii.git
+cd Lichii
+git switch feature/linux-fsr412-beamng
 cd ..
+git clone https://github.com/Mob1K7105/beamng-fsr4-linux.git
+git -C beamng-fsr4-linux switch --detach 10791f325b66bff7413577c65c5aa7dfb
+cd Lichii
+cmake -S . -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_LICHII_LINUX_FSR412=ON \
+    -DLICHII_BEAMNG_FSR412_ROOT=(realpath ../beamng-fsr4-linux)
+cmake --build build --target yuzu --parallel (nproc)
 ```
 
-Configure Lichii using the normal build flags for your installation, with
-these additional options (example directory names only):
+The binary is `build/bin/lichii`. The full release build has additional
+optional CMake switches; the dedicated CI workflow uses the same native
+backend flag and an explicit Qt configuration.
+
+If the build configuration can't find the external FSR source, check the
+`LICHII_BEAMNG_FSR412_ROOT` path. The source and assets are *not* copied
+into Lichii.
+
+## Enable for testing
+
+The source checkout's `assets/` directory contains the INT8 shader/model
+sets. In a **fish** shell, from inside the Lichii checkout:
 
 ```fish
-cmake -S Lichii -B Lichii/build -G Ninja \
-  -DENABLE_LICHII_LINUX_FSR412=ON \
-  -DLICHII_BEAMNG_FSR412_ROOT=(realpath beamng-fsr4-linux)
-cmake --build Lichii/build --target yuzu -j (nproc)
+set -x LICHII_FSR412_ASSETS_DIR (realpath ../beamng-fsr4-linux/assets)
+./build/bin/lichii
 ```
 
-The feature requires the Vulkan loader library in addition to the normal
-Lichii build dependencies. It is **OFF by default**. On platforms other than
-Linux it is a configuration error.
+In Lichii's Graphics settings, choose the AMD RADV Vulkan device, then check:
 
-## Developer-only dispatch testing (unsafe image quality)
+- **Use AMD FSR 3.1 upscaling in Ocarina of Time**
+- **Use native FSR 4.1.2 (Linux, experimental)**
 
-For controlled diagnostics **only**:
+Start or restart Ocarina after applying the settings. No official AMD DLL
+download is necessary. The checkbox appears only in opt-in Linux builds
+and on AMD RADV devices.
 
-```fish
-set -x LICHII_FSR412_EXPERIMENTAL 1
-set -x LICHII_FSR412_ALLOW_STANDARD_DEPTH 1
-set -x LICHII_FSR412_ASSETS_DIR (realpath beamng-fsr4-linux/assets)
-```
+Alternatively, for command-line diagnostics, set
+`LICHII_FSR412_EXPERIMENTAL=1` in the environment before starting the
+app; this bypasses the FSR 4 checkbox but still requires Ocarina's FSR
+replacement to be selected. To force the FSR 3.1 comparison, unset it and
+uncheck the FSR 4 setting.
 
-Start Lichii from the same fish shell with the Ocarina FSR backend enabled.
-The desktop AMD FSR 4 checkbox is intentionally still hidden on Linux: this
-test mode uses environment variables instead.
+## What this branch implements
 
-The explicit depth override does **not** fix depth; it permits incorrect input
-for low-level Vulkan testing and may produce wrong output. Without it (or
-without assets, INT8, or push-descriptor support), FSR 3.1 takes over. If the
-BeamNG runtime declines to record, the current frame may still be invalid and
-FSR 3.1 takes over on the next frame, matching the prior asynchronous fallback
-semantics. Do not distribute test builds as working FSR 4.1.2.
+- Native Linux-only selection of the external
+  `Fsr411::Upscaler::Record()` backend. The original Windows official AMD
+  FFX runtime path is preserved.
+- An Ocarina D32 standard-depth **to reversed-Z R32F** compute pass. FSR 4.1.2
+  gets the converted depth, not the unconverted scene depth.
+- Lichii's tonemapped RGBA16F scene color, RG16F motion vectors in render
+  pixels, reconstructed camera jitter, reset and sharpening are forwarded
+  to the BeamNG 4.1.2 backend.
+- Cached input Vulkan image views, an RGBA16F output image and barriers
+  around conversion, upscaling, and presentation.
+- Required compute-derivative device feature negotiation on AMD for the
+  opt-in build, and runtime checks for INT8/dot-product capabilities.
+- Output-format/size and asset validation with fallback to FSR 3.1.
+- A temporary `scheduler.Finish()` after each evaluation to protect the
+  BeamNG backend's host-mapped eight-slot uniform-buffer ring and guarantee
+  failures are detected before handing the output to presentation.
 
-## Integration accomplished in this first stage
+**Performance results with this interim per-frame wait must not be used as
+a final comparison to FSR 3.1.** The GPU timeline synchronization still
+needs to be optimized once correctness is established.
 
-- Select the BeamNG 4.1.2 native backend only in explicit Linux opt-in builds;
-  otherwise retain the existing AMD signed-Windows-DLL path.
-- Forward the Ocarina scene color, depth, reconstructed motion, jitter, output
-  and sharpening parameters to `Fsr411::Upscaler::Record()`.
-- Create and cache input Vulkan image views; create the RGBA16F output image
-  and preserve its existing Lichii presentation interface.
-- Maintain `GENERAL` image layouts and add explicit GPU dependency barriers.
-- Fail closed on missing assets, unexpected formats, incompatible Vulkan
-  prerequisites and unsupported output sizes.
-- Keep the existing FSR 3.1 fallback path.
-- Synchronize every recorded frame for initial correctness investigations
-  (temporary performance cost).
+## Important remaining validation
 
-## Required before enabling normally
+- **Build:** the dedicated native-backend GitHub Actions workflow must
+  compile cleanly with GCC 13 and `ENABLE_WERROR=ON`.
+- **GPU:** test on Radeon RX 7800 XT/RADV with validation layers, confirming
+  that required Vulkan features are present and that the FSR 4.1.2 shader
+  variant is correctly selected from the external asset sets.
+- **Depth and motion:** compare moving camera/actors, occlusion transitions,
+  thin features and previous-frame history to the known-good FSR 4.1.1
+  Vulkan implementation. The converted R32F view must be compatible with
+  the translated shader's sampled depth descriptor.
+- **Failed frame / resizing:** test missing assets, unsupported size, game
+  restart, live resolution changes, sampler image replacement and fallback.
+- **Quality:** BeamNG's public `Fsr411::Frame` does not expose a reactive
+  mask. Lichii's existing effects bias/reactive mask is not supplied to
+  that backend. Inspect for trails around particles and effects.
 
-1. **Depth convention:** convert the standard Ocarina depth to the reversed-Z
-   representation expected by the BeamNG prepass (or prove a different safe
-   contract), then verify edge/disocclusion behavior with reference captures.
-2. **Device features:** ensure the logical Vulkan device actually enables
-   `shaderInt8`, integer dot products, 16-bit arithmetic,
-   `VK_KHR_push_descriptor`, `VK_KHR_compute_shader_derivatives`, and any
-   required shader capabilities. This adapter currently disables the optional
-   mixed-float-dot prepass and subgroup-size-control optimization. Unsupported
-   capabilities must produce a clean fallback, not a crash.
-3. **Resource contracts:** verify the color and motion-vector conventions,
-   depth aspect, shader-read image usage and any required reactive masks with
-   validation layers enabled. BeamNG's `Fsr411::Frame` does not accept a
-   reactive mask in its public interface.
-4. **Synchronization:** replace the per-frame `scheduler.Finish()` with a
-   bounded GPU timeline/fence guarantee for BeamNG's 8 in-flight slots.
-5. **Error behavior:** validate asynchronous Record failures, shutdown, live
-   resolution change, reset and FSR 3.1 history handoff. Ensure a failed frame
-   can never consume uninitialized output.
-6. **Parity and performance:** test on an RDNA 3 Radeon (RX 7800 XT is a useful
-   target) with Ocarina of Time using fixed scenes, comparing FSR 3.1, 4.1.1
-   and 4.1.2. Collect GPU-timestamp timings, flicker/ghosting captures and logs.
-7. **User interface:** after correctness passes, expose a Linux FSR 4.1.2
-   selector and asset-status information without showing the Windows-only AMD
-   signed-DLL download panel.
+## Logs and test report
 
-The upstream BeamNG author's tests were performed on an RX 6700 XT (RDNA 2);
-this is not evidence that Lichii's RDNA 3 path is already validated.
+When reporting the first GPU test, collect the renderer logs containing
+`Linux FSR 4.1.2`, `Ocarina FSR 4 evaluated` or `using FSR 3.1`.
+Also record whether the shader assets were found, GPU and driver,
+render/output resolution, selected quality preset, and symptoms.
 
-## References
+Start with still scenes, then camera pans and actors passing in front of
+background geometry. Compare to the built-in FSR 3.1 path; do not disable
+fallback if the image is black or the Vulkan validation layer reports errors.
 
-- Original Lichii Linux FSR 4 proof of concept:
-  https://github.com/zortos293/Lichii/pull/915
-- Official Windows FFX SDK 2.4 integration:
-  https://github.com/zortos293/Lichii/pull/1062
-- Reusable BeamNG Vulkan FSR 4.1.2 code:
-  https://github.com/Mob1K7105/beamng-fsr4-linux/blob/v0.2.1/fsr411/fsr411.h
-- BeamNG correctness/compatibility:
-  https://github.com/Mob1K7105/beamng-fsr4-linux/blob/v0.2.1/docs/VERIFICATION.md
+## Source, licenses and acknowledgments
+
+- [BeamNG independent FSR 4.1.2 implementation](https://github.com/Mob1K7105/beamng-fsr4-linux) — source pinned at `v0.2.1`.
+- [FSR 4.1.1-linux / bbport](https://github.com/Mob1K7105/beamng-fsr4-linux/blob/v0.2.1/docs/LICENSING.md) — prior work from which the Vulkan code derives.
+- [AMD SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) — original FSR 4.1.2 model and shader source.
+- [Lichii PR #915](https://github.com/zortos293/Lichii/pull/915) — earlier native 4.1.1 integration reference.
+- [Lichii PR #1062](https://github.com/zortos293/Lichii/pull/1062) — signed Windows SDK 2.4 integration.
+
+The external C++ implementation is GPL-2.0-or-later, compatible with
+Lichii's GPL-3.0-or-later source. AMD-derived shader/model assets have
+separate notices and license terms in the external project; preserve
+`assets/NOTICE.md`, `notices/AMD-SDK-LICENSE.md` and all required notices
+if you redistribute the assets. This integration is **unofficial**.
