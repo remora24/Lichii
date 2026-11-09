@@ -320,6 +320,7 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
             return false;
         }
         CreateOutput(in.upscale_size);
+        CreateReversedDepth(in.render_size);
     }
 
     // Cache input views, recreating them only when Lichii swaps the underlying
@@ -346,9 +347,12 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     const VkImageView depth = view_for(linux_depth, in.depth);
     const VkImageView motion = view_for(linux_motion, in.motion_vectors);
 
+    // The prepass takes the numeric reversed-Z values, stored in a sampled
+    // R32F color image to avoid writing to a Vulkan depth attachment.
     const Fsr411::Frame frame{
         .color = {in.color.image, color, in.render_size.width, in.render_size.height},
-        .depth = {in.depth.image, depth, in.render_size.width, in.render_size.height},
+        .depth = {*reversed_depth_image, *reversed_depth_view,
+                  in.render_size.width, in.render_size.height},
         .motion = {in.motion_vectors.image, motion, in.render_size.width, in.render_size.height},
         .output = {*output_image, *output_view, in.upscale_size.width, in.upscale_size.height},
         .render_width = in.render_size.width,
@@ -364,8 +368,26 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         .auto_exposure = false, // Tonemapped color; use identity exposure.
     };
 
+    // The mapped descriptor set is updated only after the preceding GPU
+    // completion. Do not update it while the old shader might still use it.
+    const std::array image_infos{
+        VkDescriptorImageInfo{*depth_sampler, depth, VK_IMAGE_LAYOUT_GENERAL},
+        VkDescriptorImageInfo{VK_NULL_HANDLE, *reversed_depth_view, VK_IMAGE_LAYOUT_GENERAL},
+    };
+    const std::array writes{
+        VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                             depth_descriptor_sets[0], 0, 0, 1,
+                             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                             &image_infos[0]},
+        VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                             depth_descriptor_sets[0], 1, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &image_infos[1]},
+    };
+    device.GetLogical().UpdateDescriptorSets(writes, {});
+    const VkDescriptorSet depth_set = depth_descriptor_sets[0];
+
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, frame, in](vk::CommandBuffer command) mutable {
+    scheduler.Record([this, frame, in, depth_set](vk::CommandBuffer command) mutable {
         constexpr VkAccessFlags OUTPUT_READ_WRITE =
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         boost::container::static_vector<VkImageMemoryBarrier, 4> before{
@@ -376,6 +398,20 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         };
         command.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, before);
+
+        // The Ocarina depth is forward-Z; the independent FSR 4 prepass
+        // requires reversed-Z. Convert it before any FSR 4 shader reads it.
+        command.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *depth_pipeline);
+        command.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   *depth_pipeline_layout, 0, depth_set, {});
+        command.Dispatch((in.render_size.width + 7) / 8,
+                         (in.render_size.height + 7) / 8, 1);
+        const auto converted_depth_ready = Barrier(
+            frame.depth.image, COLOR_RANGE,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        command.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                0, {}, {}, converted_depth_ready);
         frame.cmdbuf = *command;
         if (!linux_upscaler->Record(frame)) {
             if (!failed.exchange(true)) {
@@ -389,7 +425,11 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         command.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, {}, {}, after);
     });
-    return true;
+    // Until the mapped UBO ring can use Lichii's GPU-tick lifetime, wait for
+    // this frame. It also makes a Record() failure visible to the caller in
+    // this same frame so FSR 3.1 can produce a valid fallback output.
+    scheduler.Finish();
+    return !failed.load();
 }
 
 } // namespace Vulkan
