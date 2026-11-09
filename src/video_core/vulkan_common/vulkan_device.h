@@ -77,6 +77,7 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, ShaderFloat8, SHADER_FLOAT8, shader_float8)                                       \
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
+    FEATURE(KHR, ComputeShaderDerivatives, COMPUTE_SHADER_DERIVATIVES, compute_shader_derivatives)  \
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
@@ -103,6 +104,7 @@ VK_DEFINE_HANDLE(VmaPool)
     EXTENSION(EXT, SHADER_VIEWPORT_INDEX_LAYER, shader_viewport_index_layer)                       \
     EXTENSION(EXT, TOOLING_INFO, tooling_info)                                                     \
     EXTENSION(EXT, VERTEX_ATTRIBUTE_DIVISOR, vertex_attribute_divisor)                             \
+    EXTENSION(KHR, COMPUTE_SHADER_DERIVATIVES, compute_shader_derivatives)                         \
     EXTENSION(KHR, CREATE_RENDERPASS_2, create_renderpass2)                                        \
     EXTENSION(KHR, DEPTH_STENCIL_RESOLVE, depth_stencil_resolve)                                   \
     EXTENSION(KHR, DRAW_INDIRECT_COUNT, draw_indirect_count)                                       \
@@ -523,6 +525,14 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports int8 natively.
     bool IsInt8Supported() const {
         return features.shader_float16_int8.shaderInt8;
+    }
+
+    /// Required by the BeamNG-derived native FSR 4.1.2 INT8 shaders.
+    bool IsNativeFsr412Supported() const {
+        return extensions.compute_shader_derivatives &&
+               features.compute_shader_derivatives.computeDerivativeGroupQuads &&
+               features.shader_float16_int8.shaderInt8 && features.features.shaderInt16 &&
+               native_fsr412_integer_dot_product;
     }
 
     /// Returns true if the device allows 8-bit integer members in uniform/storage buffers.
@@ -1394,6 +1404,7 @@ private:
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.
+    bool native_fsr412_integer_dot_product{}; ///< Vulkan 1.3 shaderIntegerDotProduct.
     bool supports_d24_depth{};                 ///< Supports D24 depth buffers.
     bool must_emulate_scaled_formats{};        ///< Requires scaled vertex format emulation
     bool dynamic_state3_blending{};            ///< Has blending features of dynamic_state3.
