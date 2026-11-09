@@ -305,10 +305,9 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         return false;
     }
 
-    // Correctness-first guard: BeamNG rotates an 8-slot persistently mapped
-    // constant buffer. Until Lichii's GPU tick ownership is wired into that
-    // ring, wait before every evaluation. This is INTENTIONALLY slow.
-    scheduler.Finish();
+    // Each evaluation finishes on the GPU before returning (below), so the
+    // backend's mapped constant buffers and prior Vulkan image views are safe
+    // to update or replace on the next invocation.
 
     const bool resized = !output_image || in.render_size.width != render_extent.width ||
                          in.render_size.height != render_extent.height ||
@@ -324,7 +323,7 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     }
 
     // Cache input views, recreating them only when Lichii swaps the underlying
-    // images. The preceding Finish() makes prior GPU use safe before destruction.
+    // images. The preceding frame's completed GPU wait protects old views.
     const auto view_for = [this](LinuxInputView& cache, const Image& input) {
         if (cache.image != input.image || cache.format != input.format || !cache.view) {
             cache.view = {};
