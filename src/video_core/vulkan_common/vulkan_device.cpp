@@ -1390,6 +1390,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.
     features.features = features2.features;
+    // Vulkan 1.3 integer dot product is essential to the native FSR 4 INT8 network.
+    native_fsr412_integer_dot_product = features_1_3.shaderIntegerDotProduct != VK_FALSE;
 
 // Some features are mandatory. Check those.
 #define CHECK_FEATURE(feature, name)                                                               \
@@ -1888,6 +1890,22 @@ void Device::RemoveUnsuitableExtensions() {
         !properties.pipeline_binary.pipelineBinaryPrefersInternalCache && !DriverCachesPipelines();
     RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
                                        VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
+
+    // The independent native Vulkan FSR 4.1.2 shaders use compute derivatives.
+    // Do not enable these extra driver features unless the Linux backend is
+    // explicitly selected at process startup. Core Lichii behavior is unchanged.
+    bool want_native_fsr412 = false;
+#ifdef LICHII_LINUX_FSR412_BEAMNG
+    if (const char* enabled = std::getenv("LICHII_FSR412_EXPERIMENTAL")) {
+        want_native_fsr412 = enabled[0] == '1' && enabled[1] == '\0';
+    }
+#endif
+    extensions.compute_shader_derivatives =
+        extensions.compute_shader_derivatives && want_native_fsr412 &&
+        features.compute_shader_derivatives.computeDerivativeGroupQuads;
+    RemoveExtensionFeatureIfUnsuitable(extensions.compute_shader_derivatives,
+                                       features.compute_shader_derivatives,
+                                       VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
 
     // VK_EXT_shader_float8, only for AMD FSR 4: its RDNA 4 network runs in FP8 and drew a black
     // picture without the feature on the device (found by CheezerWheezer).
