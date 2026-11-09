@@ -14,6 +14,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/host_shaders/ocarina_fsr4_depth_comp_spv.h"
 #include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -72,10 +73,9 @@ VkImageMemoryBarrier InputBarrier(const Fsr4Upscaler::Image& image) {
 } // Anonymous namespace
 
 bool Fsr4Upscaler::IsWanted(const Device& device) {
-    // The normal amd_fsr4 setting remains Windows-only until image parity and
-    // required device features have been validated. No unsupported default path.
-    return device.GetVendorID() == 0x1002 && device.IsInt8Supported() &&
-           EnvironmentEnabled("LICHII_FSR412_EXPERIMENTAL");
+    return device.GetVendorID() == 0x1002 && device.IsNativeFsr412Supported() &&
+           (Settings::values.amd_fsr4.GetValue() ||
+            EnvironmentEnabled("LICHII_FSR412_EXPERIMENTAL"));
 }
 
 Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
