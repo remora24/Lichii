@@ -2752,8 +2752,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             return;
         }
         const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-        shaders += fmt::format(" translate_wait_ms={:.1f} stage_translate_ms={:.1f} stages={}",
-                               ms(parallel->wait), ms(parallel->stages), parallel->count);
+        shaders += fmt::format(
+            " translate_wait_ms={:.1f} stage_translate_ms={:.1f} "
+            "tex_pool_flush_ms={:.1f} stages={}",
+            ms(parallel->wait), ms(parallel->stages), ms(parallel->flush),
+            parallel->count);
         ReportRuntimePipeline("Graphics", begin, shaders, parallel->wait, parallel->stages);
     };
     GraphicsEnvironments environments;
@@ -2776,17 +2779,45 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // make it dirty again. A pool too large to flush on every miss translates here as before.
     if (std::ranges::count_if(graphics_key.unique_hashes, [](u64 hash) { return hash != 0; }) >=
         2) {
-        constexpr u64 MaxFlushedTexturePoolBytes = u64{1} << 20;
+        // An opt-in threshold for larger descriptor pools. The default 1 MiB cap
+        // remains unchanged. Ocarina's pool is 1,058,176 bytes, just above it,
+        // so its pipeline stages currently always translate serially.
+        // Larger pools cost more to flush; measure both flush and stage wait.
+        static const u64 max_flushed_texture_pool_bytes = [] {
+            constexpr u64 DefaultMiB = 1;
+            constexpr u64 MaxMiB = 4;
+            const char* value = std::getenv("EDEN_NX2_PARALLEL_STAGE_POOL_MIB");
+            if (value == nullptr || *value == '\0') {
+                return DefaultMiB << 20;
+            }
+            char* end{};
+            const unsigned long long mib = std::strtoull(value, &end, 10);
+            if (end == value || *end != '\0' || mib < DefaultMiB || mib > MaxMiB) {
+                LOG_WARNING(Render_Vulkan,
+                            "Invalid EDEN_NX2_PARALLEL_STAGE_POOL_MIB={} "
+                            "(valid range {}-{}); keeping {} MiB",
+                            value, DefaultMiB, MaxMiB, DefaultMiB);
+                return DefaultMiB << 20;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Parallel graphics stage texture-pool limit: {} MiB (default {} MiB)",
+                     mib, DefaultMiB);
+            return static_cast<u64>(mib) << 20;
+        }();
         const auto& tex_header = maxwell3d->regs.tex_header;
         const u64 pool_bytes = (u64{tex_header.limit} + 1) * sizeof(Tegra::Texture::TICEntry);
-        if (pool_bytes <= MaxFlushedTexturePoolBytes) {
+        if (pool_bytes <= max_flushed_texture_pool_bytes) {
+            const auto flush_begin = std::chrono::steady_clock::now();
             gpu_memory->FlushRegion(tex_header.Address(), pool_bytes);
+            const auto flush_elapsed = std::chrono::steady_clock::now() - flush_begin;
             for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
                 if (graphics_key.unique_hashes[index] != 0) {
                     environments.envs[index].SetTexturePoolFlushed();
                 }
             }
             parallel.emplace();
+            parallel->flush =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(flush_elapsed);
         } else {
             static std::atomic<bool> logged{};
             if (!logged.exchange(true, std::memory_order_relaxed)) {
