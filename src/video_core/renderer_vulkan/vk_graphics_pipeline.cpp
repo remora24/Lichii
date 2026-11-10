@@ -594,6 +594,8 @@ GraphicsPipeline::GraphicsPipeline(
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
+        auto after_emit = begin;
+        auto after_driver = begin;
         SCOPE_EXIT {
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
@@ -603,9 +605,11 @@ GraphicsPipeline::GraphicsPipeline(
             if (emit_stages) {
                 spv_modules = emit_stages();
             }
+            after_emit = std::chrono::steady_clock::now();
             const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
             MakePipeline(render_pass);
+            after_driver = std::chrono::steady_clock::now();
         } catch (const Shader::Exception& exception) {
             LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(), exception.what());
             throw;
@@ -633,8 +637,13 @@ GraphicsPipeline::GraphicsPipeline(
             if (elapsed > std::chrono::milliseconds{100} ||
                 (elapsed > std::chrono::milliseconds{2} && logged.fetch_add(1) < 400)) {
                 LOG_INFO(Render_Vulkan,
-                         "Nx2Perf async_pipelines: {:016x} worker emission and driver build {:.1f} ms",
-                         key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count());
+                         "Nx2Perf async_pipelines: {:016x} worker emission and driver build {:.1f} ms "
+                         "emit_ms={:.1f} renderpass_driver_ms={:.1f} post_ms={:.1f}",
+                         key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count(),
+                         std::chrono::duration<double, std::milli>(after_emit - begin).count(),
+                         std::chrono::duration<double, std::milli>(after_driver - after_emit).count(),
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - after_driver).count());
             }
         }
     }};
