@@ -1214,9 +1214,8 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;
 
-    // The Vulkan 1.2/1.3 feature structures are persistent Device members:
-    // features2.pNext is also passed to vkCreateDevice after this returns.
-    // This retains shaderIntegerDotProduct for the native FSR 4 backend.
+    // The per-feature pNext chain is also passed to vkCreateDevice. In particular,
+    // shaderIntegerDotProduct must be queried and enabled for native FSR 4.
     // Configure properties.
     properties.properties = physical.GetProperties();
 
@@ -1331,16 +1330,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Set next pointer.
     void** next = &features2.pNext;
 
-    // Vulkan 1.2 and 1.3 features
-    if (instance_version >= VK_API_VERSION_1_2) {
-        features_1_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        features_1_3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-
-        features_1_2.pNext = &features_1_3;
-
-        *next = &features_1_2;
-    }
-
 // Test all features we know about. If the feature is not available in core at our
 // current API version, and was not enabled by an extension, skip testing the feature.
 // We set the structure sType explicitly here as it is zeroed by the constructor.
@@ -1389,8 +1378,10 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.
     features.features = features2.features;
-    // Vulkan 1.3 integer dot product is essential to the native FSR 4 INT8 network.
-    native_fsr412_integer_dot_product = features_1_3.shaderIntegerDotProduct != VK_FALSE;
+    // The individual Vulkan 1.3 (or VK_KHR_shader_integer_dot_product) feature
+    // is populated by GetFeatures2 and stays enabled through vkCreateDevice.
+    native_fsr412_integer_dot_product =
+        features.shader_integer_dot_product.shaderIntegerDotProduct != VK_FALSE;
 
 // Some features are mandatory. Check those.
 #define CHECK_FEATURE(feature, name)                                                               \
