@@ -2034,7 +2034,28 @@ void PipelineCache::EvictUnusedPipelines() {
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; rebuilding it later requires a full GPU-thread shader translation
     // (~8.5 ms each) plus a driver pipeline cache hit.
-    constexpr u64 EvictAfterFrames = 9000;
+    // Default keeps the existing memory policy. For an opt-in A/B test, retain
+    // previously used pipelines longer before triggering CPU translation again.
+    // Never disable eviction outright: every resident pipeline consumes driver memory.
+    static const u64 EvictAfterFrames = [] {
+        constexpr u64 DefaultFrames = 9000;
+        constexpr u64 MaxFrames = 36000;
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
+        if (!value || !*value) {
+            return DefaultFrames;
+        }
+        char* end{};
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0' || parsed < DefaultFrames || parsed > MaxFrames) {
+            LOG_WARNING(Render_Vulkan,
+                        "Invalid EDEN_NX2_PIPELINE_EVICT_FRAMES={} (range {}-{}); "
+                        "using {}", value, DefaultFrames, MaxFrames, DefaultFrames);
+            return DefaultFrames;
+        }
+        LOG_INFO(Render_Vulkan, "Pipeline eviction retention: {} frames (default {})",
+                 parsed, DefaultFrames);
+        return static_cast<u64>(parsed);
+    }();
     if (frame_count <= EvictAfterFrames) {
         return;
     }
