@@ -51,6 +51,7 @@ VK_DEFINE_HANDLE(VmaPool)
             shader_demote_to_helper_invocation)                                                    \
     FEATURE(EXT, SubgroupSizeControl, SUBGROUP_SIZE_CONTROL, subgroup_size_control)                \
     FEATURE(KHR, Maintenance4, MAINTENANCE_4, maintenance4)                                        \
+    FEATURE(KHR, ShaderIntegerDotProduct, SHADER_INTEGER_DOT_PRODUCT, shader_integer_dot_product) \
     FEATURE(KHR, Synchronization2, SYNCHRONIZATION_2, synchronization2)
 
 #define FOR_EACH_VK_FEATURE_1_4(FEATURE)
@@ -1395,10 +1396,8 @@ private:
     Features features{};
     Properties properties{};
 
-    // These structs remain in features2.pNext through vkCreateDevice.
-    // In particular, native FSR 4 needs Vulkan 1.3 shaderIntegerDotProduct.
-    VkPhysicalDeviceVulkan12Features features_1_2{};
-    VkPhysicalDeviceVulkan13Features features_1_3{};
+    // Individual feature structures are linked through features2.pNext and
+    // retained through vkCreateDevice, including shaderIntegerDotProduct.
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     VkPhysicalDeviceProperties2 properties2{};
