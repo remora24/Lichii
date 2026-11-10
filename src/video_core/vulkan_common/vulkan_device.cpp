@@ -1214,10 +1214,9 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;
 
-    // Configure properties.
-    VkPhysicalDeviceVulkan12Features features_1_2{};
-    VkPhysicalDeviceVulkan13Features features_1_3{};
-
+    // The Vulkan 1.2/1.3 feature structures are persistent Device members:
+    // features2.pNext is also passed to vkCreateDevice after this returns.
+    // This retains shaderIntegerDotProduct for the native FSR 4 backend.
     // Configure properties.
     properties.properties = physical.GetProperties();
 
