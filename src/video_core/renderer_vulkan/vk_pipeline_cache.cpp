@@ -1969,6 +1969,23 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     auto& pipeline{pair->second};
     if (is_new) {
         ReportNewPipelineKey(graphics_key);
+        if (StutterTrace::Enabled()) {
+            const auto evicted = evicted_pipeline_sources.find(graphics_key.Hash());
+            if (evicted != evicted_pipeline_sources.end()) {
+                static u64 rebuilt_used{};
+                static u64 rebuilt_prebuilt{};
+                const bool was_used = evicted->second;
+                evicted_pipeline_sources.erase(evicted);
+                ++(was_used ? rebuilt_used : rebuilt_prebuilt);
+                const u64 rebuilt_total = rebuilt_used + rebuilt_prebuilt;
+                if (rebuilt_total <= 32 || rebuilt_total % 100 == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2PipelineRebuildAfterEviction pipeline={:016x} was_used={} "
+                             "rebuilt_used={} rebuilt_prebuilt={}",
+                             graphics_key.Hash(), was_used, rebuilt_used, rebuilt_prebuilt);
+                }
+            }
+        }
         if (scheduled_prebuild) {
             pipeline = scheduled_prebuild->Take(graphics_key);
         }
@@ -2163,6 +2180,9 @@ void PipelineCache::EvictUnusedPipelines() {
             used_and_evicted.insert(it->first.Hash());
         }
         evicted_pointer_slots.Remember(it->first.Hash(), pipeline->MappedPointers());
+        if (VideoCommon::StutterTrace::Enabled()) {
+            evicted_pipeline_sources.insert_or_assign(it->first.Hash(), pipeline->WasUsed());
+        }
         evicted_pipelines.emplace_back(tick, std::move(it->second));
         it = graphics_cache.erase(it);
         ++evicted;
