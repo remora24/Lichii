@@ -73,9 +73,31 @@ VkImageMemoryBarrier InputBarrier(const Fsr4Upscaler::Image& image) {
 } // Anonymous namespace
 
 bool Fsr4Upscaler::IsWanted(const Device& device) {
-    return device.GetVendorID() == 0x1002 && device.IsNativeFsr412Supported() &&
-           (Settings::values.amd_fsr4.GetValue() ||
-            EnvironmentEnabled("LICHII_FSR412_EXPERIMENTAL"));
+    const bool checkbox_enabled = Settings::values.amd_fsr4.GetValue();
+    const bool env_enabled = EnvironmentEnabled("LICHII_FSR412_EXPERIMENTAL");
+    if (!checkbox_enabled && !env_enabled) {
+        LOG_INFO(Render_Vulkan,
+                 "Linux FSR 4.1.2: not requested (checkbox=false, experimental_env=false)");
+        return false;
+    }
+    if (device.GetVendorID() != 0x1002) {
+        LOG_WARNING(Render_Vulkan,
+                    "Linux FSR 4.1.2: requested but selected GPU is not AMD (vendor={:#x})",
+                    device.GetVendorID());
+        return false;
+    }
+    if (!device.IsNativeFsr412Supported(true)) {
+        LOG_WARNING(Render_Vulkan,
+                    "Linux FSR 4.1.2: requested (checkbox={}, experimental_env={}) "
+                    "but Vulkan capability checks failed; using FSR 3.1",
+                    checkbox_enabled, env_enabled);
+        return false;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Linux FSR 4.1.2: requested (checkbox={}, experimental_env={}) "
+             "and Vulkan capability checks passed; initializing backend",
+             checkbox_enabled, env_enabled);
+    return true;
 }
 
 Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
