@@ -2078,6 +2078,7 @@ void PipelineCache::EvictUnusedPipelines() {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
+    const auto eviction_started = std::chrono::steady_clock::now();
     const u64 tick = scheduler.CurrentTick();
     // At ~0.45 MiB each, 2000 prebuilt pipelines use about 0.9 GiB of driver
     // memory. Some games have many more pipelines prebuilt from the disk cache,
@@ -2197,9 +2198,12 @@ void PipelineCache::EvictUnusedPipelines() {
     }
     LOG_INFO(Render_Vulkan,
              "Evicted {} graphics pipelines unused for {} frames, {} left "
-             "(used={} not-yet-used={} protected-prebuilt={} priority={})",
+             "(used={} not-yet-used={} protected-prebuilt={} priority={} "
+             "eviction_ms={:.2f})",
              evicted, EvictAfterFrames, graphics_cache.size(), evicted_used,
-             evicted_prebuilt, kept_prebuilt, PreferRecentlyUsed);
+             evicted_prebuilt, kept_prebuilt, PreferRecentlyUsed,
+             std::chrono::duration<double, std::milli>(
+                 std::chrono::steady_clock::now() - eviction_started).count());
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
