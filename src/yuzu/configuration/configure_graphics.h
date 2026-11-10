@@ -26,6 +26,7 @@ class QPushButton;
 class QEvent;
 class QObject;
 class QComboBox;
+class QCheckBox;
 
 namespace Settings {
 enum class NvdecEmulation : u32;
@@ -72,6 +73,9 @@ private:
     void UpdateAPILayout();
     void UpdateDeviceSelection(int device);
     void UpdateAmdFsr4Visibility();
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    void UpdateLinuxFsrSelection();
+#endif
 
     void RetrieveVulkanDevices();
 
@@ -112,4 +116,10 @@ private:
     QComboBox* aspect_ratio_combobox;
     QComboBox* resolution_combobox;
     QWidget* amd_fsr4_group{}; ///< The FSR 4 setting and AmdFsr4Panel
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    QCheckBox* ocarina_fsr_checkbox{};
+    QCheckBox* linux_fsr4_checkbox{};
+    bool ocarina_fsr_initially_enabled{};
+    bool linux_fsr4_initially_enabled{};
+#endif
 };

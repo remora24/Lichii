@@ -16,6 +16,12 @@
 #include "common/common_types.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+#ifdef LICHII_LINUX_FSR412_BEAMNG
+namespace Fsr411 {
+class Upscaler;
+}
+#endif
+
 namespace Vulkan {
 
 class Device;
@@ -80,6 +86,33 @@ private:
     void DestroyContext();
     void CreateOutput(VkExtent2D upscale_size);
     void CreateExposure();
+
+#ifdef LICHII_LINUX_FSR412_BEAMNG
+    // Cached views must outlive the submitted commands that reference them.
+    struct LinuxInputView {
+        VkImage image = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        vk::ImageView view;
+    };
+    std::unique_ptr<Fsr411::Upscaler> linux_upscaler;
+    LinuxInputView linux_color;
+    LinuxInputView linux_depth;
+    LinuxInputView linux_motion;
+    // The BeamNG shader expects reversed-Z depth as a sampled float image.
+    // Keep the conversion pipeline and descriptor set alive across frames.
+    vk::Image reversed_depth_image;
+    vk::ImageView reversed_depth_view;
+    VkExtent2D reversed_depth_extent{};
+    vk::Sampler depth_sampler;
+    vk::DescriptorSetLayout depth_set_layout;
+    vk::DescriptorPool depth_descriptor_pool;
+    vk::DescriptorSets depth_descriptor_sets;
+    vk::PipelineLayout depth_pipeline_layout;
+    vk::Pipeline depth_pipeline;
+
+    void CreateDepthPipeline();
+    void CreateReversedDepth(VkExtent2D extent);
+#endif
 
     const Device& device;
     Scheduler& scheduler;

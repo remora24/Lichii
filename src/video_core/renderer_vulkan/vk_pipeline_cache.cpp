@@ -2583,9 +2583,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     }
     static_assert(VideoCommon::EvictedPointerSlots::NumPrograms == Maxwell::MaxShaderProgram);
     VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
-    for (size_t index = 0, env_index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+    for (size_t index = 0, mapped_env_index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         if (key.unique_hashes[index] != 0) {
-            mapped_pointers[index] = envs[env_index++]->MappedStoragePointerKeys();
+            mapped_pointers[index] = envs[mapped_env_index++]->MappedStoragePointerKeys();
         }
     }
     auto pipeline = std::make_unique<GraphicsPipeline>(
@@ -2599,13 +2599,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();
-    size_t env_index{0};
+    size_t dump_env_index{0};
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         if (key.unique_hashes[index] == 0) {
             continue;
         }
-        Shader::Environment& env{*envs[env_index]};
-        ++env_index;
+        Shader::Environment& env{*envs[dump_env_index]};
+        ++dump_env_index;
 
         const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
         try {

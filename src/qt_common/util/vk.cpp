@@ -67,8 +67,15 @@ void PopulateRecords(std::vector<Record>& records, QWindow* window) try {
         bool has_broken_compute{
             Vulkan::Device::CheckBrokenCompute(driverID, properties.properties.driverVersion)};
 
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+        // Linux uses the independent INT8 Vulkan implementation, not AMD's
+        // proprietary signed-Windows-DLL runtime.
+        const bool fsr4_capable = properties.properties.vendorID == 0x1002 &&
+                                  driverID == VK_DRIVER_ID_MESA_RADV;
+#else
         const bool fsr4_capable = VideoCommon::IsFsr4CapableGpu(
             properties.properties.vendorID, driverID == VK_DRIVER_ID_AMD_PROPRIETARY, name);
+#endif
 
         std::string driver_string = Vulkan::vk::GetDriverName(driver_properties);
 

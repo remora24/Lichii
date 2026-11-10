@@ -235,8 +235,9 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
-#ifndef _WIN32
-        // AMD's FSR 4 runtime is Windows-only.
+#if !defined(_WIN32) && !defined(LICHII_LINUX_FSR412_BEAMNG)
+        // Official signed FFX DLLs are Windows-only; Linux's community
+        // backend is available only in an explicitly enabled native build.
         if (setting->Id() == Settings::values.amd_fsr4.Id()) {
             continue;
         }
@@ -356,7 +357,19 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             connect(widget->checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
             hold_graphics.emplace(setting->Id(), group);
 #endif
+        } else if (setting->Id() == Settings::values.ocarina_fsr.Id()) {
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+            ocarina_fsr_checkbox = widget->checkbox;
+#endif
+            hold_graphics.emplace(setting->Id(), widget);
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+            // Native Linux uses an externally installed BeamNG-derived FSR
+            // 4.1.2 implementation. Never show AMD's Windows-DLL downloader.
+            amd_fsr4_group = widget;
+            linux_fsr4_checkbox = widget->checkbox;
+            hold_graphics.emplace(setting->Id(), widget);
+#else
             // AMD's files and a download button under the checkbox, shown for GPUs FSR 4 runs on.
             amd_fsr4_group = new QWidget(this);
             QVBoxLayout* group_layout = new QVBoxLayout(amd_fsr4_group);
@@ -368,6 +381,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             panel->setVisible(widget->checkbox->isChecked());
             connect(widget->checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
             hold_graphics.emplace(setting->Id(), amd_fsr4_group);
+#endif
         } else if (setting->Id() == Settings::values.frame_gen.Id()) {
             frame_gen_checkbox = widget->checkbox;
             hold_graphics.emplace(setting->Id(), widget);
@@ -379,6 +393,20 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
     }
+
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    if (ocarina_fsr_checkbox != nullptr && linux_fsr4_checkbox != nullptr) {
+        // Leave the checked option editable so it can be unchecked. The other
+        // option is disabled until then, rather than automatically switching.
+        // Preserve restrictions that the settings builder already imposed.
+        ocarina_fsr_initially_enabled = ocarina_fsr_checkbox->isEnabled();
+        linux_fsr4_initially_enabled = linux_fsr4_checkbox->isEnabled();
+        connect(ocarina_fsr_checkbox, &QCheckBox::toggled, this,
+                [this](bool) { UpdateLinuxFsrSelection(); });
+        connect(linux_fsr4_checkbox, &QCheckBox::toggled, this,
+                [this](bool) { UpdateLinuxFsrSelection(); });
+    }
+#endif
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {
@@ -552,7 +580,36 @@ void ConfigureGraphics::UpdateAmdFsr4Visibility() {
     amd_fsr4_group->setVisible(GetCurrentGraphicsBackend() == Settings::RendererBackend::Vulkan &&
                                device >= 0 && static_cast<size_t>(device) < records.size() &&
                                records[device].fsr4_capable);
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    UpdateLinuxFsrSelection();
+#endif
 }
+
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+void ConfigureGraphics::UpdateLinuxFsrSelection() {
+    if (ocarina_fsr_checkbox == nullptr || linux_fsr4_checkbox == nullptr) {
+        return;
+    }
+
+    const int selected_device = vulkan_device_combobox->currentIndex();
+    const bool fsr4_available =
+        GetCurrentGraphicsBackend() == Settings::RendererBackend::Vulkan &&
+        selected_device >= 0 && static_cast<size_t>(selected_device) < records.size() &&
+        records[selected_device].fsr4_capable;
+
+    // Old configurations may have both options enabled. FSR 4.1.2 previously
+    // took priority, so keep it checked and clear the FSR 3.1 selection.
+    if (fsr4_available && linux_fsr4_checkbox->isChecked() &&
+        ocarina_fsr_checkbox->isChecked()) {
+        ocarina_fsr_checkbox->setChecked(false);
+    }
+
+    ocarina_fsr_checkbox->setEnabled(ocarina_fsr_initially_enabled &&
+                                    (!fsr4_available || !linux_fsr4_checkbox->isChecked()));
+    linux_fsr4_checkbox->setEnabled(linux_fsr4_initially_enabled &&
+                                    !ocarina_fsr_checkbox->isChecked());
+}
+#endif
 
 void ConfigureGraphics::RetrieveVulkanDevices() {
     vulkan_devices.clear();

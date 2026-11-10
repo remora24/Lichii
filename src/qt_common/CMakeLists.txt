@@ -86,6 +86,9 @@ target_compile_definitions(qt_common PUBLIC
 
 target_link_libraries(qt_common PRIVATE core Qt6::Core Qt6::Concurrent SimpleIni::SimpleIni QuaZip::QuaZip)
 target_link_libraries(qt_common PUBLIC frozen::frozen-headers Vulkan::Headers)
+if (ENABLE_LICHII_LINUX_FSR412 AND LINUX)
+    target_compile_definitions(qt_common PRIVATE LICHII_LINUX_FSR412_BEAMNG=1)
+endif()
 target_link_libraries(qt_common PRIVATE gamemode::headers frontend_common)
 
 if (ENABLE_OPENGL)

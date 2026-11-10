@@ -1,0 +1,100 @@
+name: Linux FSR 4.1.2 experimental build
+
+on:
+  pull_request:
+    branches:
+      - nx2
+  push:
+    branches:
+      - nx2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-fsr412:
+    name: Build native FSR 4.1.2 with GCC 13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out Lichii
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf gcc-13 g++-13 git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
+            mesa-common-dev nasm ninja-build qt6-base-private-dev \
+            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
+            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
+            spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev \
+            libopus-dev libasound2-dev ccache pipx libvulkan-dev \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Qt 6.8.3
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06
+        with:
+          version: "6.8.3"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtcharts
+          cache: true
+
+      - name: Check out pinned BeamNG FSR4 Vulkan implementation
+        run: |
+          git clone --branch v0.2.1 --depth 1 https://github.com/Mob1K7105/beamng-fsr4-linux.git /tmp/beamng-fsr412
+          test "$(git -C /tmp/beamng-fsr412 rev-parse HEAD)" = "10791f325b66bff7413577c65c5aa7df5ae67dfb"
+
+      - name: Restore dependency cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: gcc13-native-fsr412-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            gcc13-native-fsr412-${{ runner.os }}-
+
+      - name: Configure native Linux FSR 4.1.2
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DENABLE_WERROR=ON \
+            -DENABLE_LICHII_LINUX_FSR412=ON \
+            -DLICHII_BEAMNG_FSR412_ROOT=/tmp/beamng-fsr412 \
+            -DENABLE_QT=ON \
+            -DYUZU_CMD=OFF \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR" \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DUSE_CCACHE=ON
+
+      - name: Build application with native backend
+        run: cmake --build build --target yuzu --parallel 4
+
+      - name: Save dependency cache
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: gcc13-native-fsr412-${{ runner.os }}-${{ github.sha }}
