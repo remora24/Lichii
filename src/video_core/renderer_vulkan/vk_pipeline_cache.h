@@ -162,6 +162,7 @@ private:
     struct ParallelTranslation {
         std::chrono::nanoseconds wait{};   ///< On the GPU thread
         std::chrono::nanoseconds stages{}; ///< The stages' translations together
+        std::chrono::nanoseconds flush{};  ///< Flushing the texture descriptors before jobs
         size_t count{};
     };
 
