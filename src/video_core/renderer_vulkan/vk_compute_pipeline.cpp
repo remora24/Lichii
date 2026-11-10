@@ -677,6 +677,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
+            const auto wait_begin = std::chrono::steady_clock::now();
             if (jobs) {
                 // Raised to NeedNow, and built here unless a driver worker builds it already
                 jobs->RunOrWait(job);
@@ -688,6 +689,16 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             }
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+            const auto wait_elapsed = std::chrono::steady_clock::now() - wait_begin;
+            if (VideoCommon::StutterTrace::Enabled() &&
+                wait_elapsed >= std::chrono::milliseconds{25}) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2PipelineWait kind=compute shader={:016x} wait_ms={:.1f} "
+                         "job_scheduler={}",
+                         shader_hash,
+                         std::chrono::duration<double, std::milli>(wait_elapsed).count(),
+                         jobs != nullptr);
+            }
         });
     }
 
