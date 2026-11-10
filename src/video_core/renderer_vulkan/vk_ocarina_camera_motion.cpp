@@ -745,6 +745,9 @@ struct OcarinaUpscaler::Impl {
     /// which didn't evaluate it.
     bool output_fsr4{};
     std::optional<std::chrono::steady_clock::time_point> last_evaluation;
+    // Number of frames for which the exact-match skinned Link draw was available.
+    u64 actor_motion_frames{};
+    u64 missing_actor_motion_frames{};
 
     bool UsesFsr4() const {
         return fsr4 && !fsr4->Failed();
@@ -962,8 +965,20 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.queue.AddSampledImage(depth, sampler);
     state.queue.AddImage(*resources.motion_view);
     resources.tick = state.scheduler.CurrentTick();
+    // Debug-only negative control: use camera-only motion without discarding the
+    // captured actor overlay or changing the default rendering path.
+    static const bool camera_only_motion = [] {
+        const char* value = std::getenv("EDEN_NX2_OCARINA_CAMERA_ONLY_MOTION");
+        return value && value[0] == '1';
+    }();
+    if (resources.overlay) {
+        ++state.actor_motion_frames;
+    } else {
+        ++state.missing_actor_motion_frames;
+    }
     state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), {*transform, jitter},
-                             *resources.motion, extent, resources.overlay.get());
+                             *resources.motion, extent,
+                             camera_only_motion ? nullptr : resources.overlay.get());
     state.queue.Acquire(state.scheduler, 2);
     state.queue.AddSampledImage(color, sampler);
     state.queue.AddImage(*resources.color_view);
@@ -1039,10 +1054,14 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             if (trace || frame % 120 == 0 || reset) {
                 LOG_INFO(Render_Vulkan,
                          "Ocarina FSR 4 evaluated frame={} {}x{} -> {}x{} reset={} effects={} "
-                         "jitter=({:.3f},{:.3f})",
+                         "jitter=({:.3f},{:.3f}) actor_motion={} actor_frames={}/{} "
+                         "camera_only_motion={}",
                          frame, extent.width, extent.height, output_extent.width,
                          output_extent.height, reset || elapsed > 250.0f,
-                         bias_image != VK_NULL_HANDLE, jitter[0], jitter[1]);
+                         bias_image != VK_NULL_HANDLE, jitter[0], jitter[1],
+                         resources.overlay != nullptr, state.actor_motion_frames,
+                         state.actor_motion_frames + state.missing_actor_motion_frames,
+                         camera_only_motion);
             }
         }
     }
