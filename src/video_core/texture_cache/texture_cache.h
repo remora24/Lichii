@@ -7,6 +7,8 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -2912,6 +2914,19 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
 template <class P>
 ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DAddr cpu_addr) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureCache};
+    // EDEN_NX2_IMAGE_CREATE_TRACE=1: identify which phase of texture insertion
+    // is responsible for the rare, multi-frame image-creation stalls.
+    // Explicit opt-in keeps clock reads and logging off the normal hot path.
+    static const bool image_trace = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_CREATE_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    using ImageClock = std::chrono::steady_clock;
+    const auto clock = [] { return ImageClock::now(); };
+    const auto stamp = [&] {
+        return image_trace ? clock() : ImageClock::time_point{};
+    };
+    const auto trace_start = stamp();
     ImageInfo new_info = info;
     const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
     const bool broken_views = runtime.HasBrokenTextureViewFormats();
@@ -3024,7 +3039,9 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             }
         }
     }
+    const auto before_allocation = stamp();
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    const auto after_allocation = stamp();
     if constexpr (requires(const Image& image) { image.OutOfMemory(); }) {
         if (slot_images[new_image_id].OutOfMemory()) {
             // Left out of the cache: lookups see no image (a null view) and make it again once
@@ -3219,6 +3236,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
         copied_whole = std::ranges::all_of(written, [](u8 whole) { return whole != 0; });
     }
+    const auto before_upload = stamp();
     if (overwritten_by_clear()) {
         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
         // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
@@ -3234,6 +3252,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         // TODO: Only upload what we need
         RefreshContents(new_image, new_image_id);
     }
+    const auto after_upload = stamp();
 
     if (can_rescale) {
         ScaleUp(new_image);
@@ -3276,6 +3295,33 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
 
     RegisterImage(new_image_id);
+    if (image_trace) {
+        const auto end = clock();
+        const auto elapsed = end - trace_start;
+        static std::atomic<u32> moderate_logs{};
+        const bool slow = elapsed >= std::chrono::milliseconds{10};
+        const bool moderate = elapsed >= std::chrono::milliseconds{3} &&
+                              moderate_logs.fetch_add(1, std::memory_order_relaxed) < 64;
+        if (slow || moderate) {
+            const auto ms = [](auto d) {
+                return std::chrono::duration<double, std::milli>(d).count();
+            };
+            LOG_INFO(HW_GPU,
+                     "Nx2ImageCreate total_ms={:.2f} lookup_ms={:.2f} allocation_ms={:.2f} "
+                     "setup_ms={:.2f} upload_ms={:.2f} finalize_ms={:.2f} "
+                     "extent={}x{}x{} format={} levels={} layers={} guest_bytes={} "
+                     "gpu_addr={:#x} overlaps={} copies={} alias={} clearing={}",
+                     ms(elapsed), ms(before_allocation - trace_start),
+                     ms(after_allocation - before_allocation),
+                     ms(before_upload - after_allocation), ms(after_upload - before_upload),
+                     ms(end - after_upload), new_info.size.width, new_info.size.height,
+                     new_info.size.depth, static_cast<u32>(new_info.format),
+                     new_info.resources.levels, new_info.resources.layers, size_bytes,
+                     gpu_addr, join_overlaps_found.size(), join_copies_to_do.size(),
+                     !join_left_aliased_ids.empty() || !join_right_aliased_ids.empty(),
+                     clearing_render_targets);
+        }
+    }
     return new_image_id;
 }
 
