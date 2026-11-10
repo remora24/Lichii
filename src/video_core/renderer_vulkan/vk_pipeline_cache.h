@@ -290,6 +290,11 @@ private:
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
     VideoCommon::EvictedPointerSlots evicted_pointer_slots;
+    // Tracing only: true if a pipeline had already been drawn when it was
+    // evicted; false if it was prebuilt and discarded before first use.
+    // Lets the next lookup distinguish rebuilding after eviction from a
+    // genuinely new shader without changing the runtime cache policy.
+    std::unordered_map<u64, bool> evicted_pipeline_sources;
 
     ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
     /// Replaced compute pipelines, destroyed once the GPU and their queued build are done with
