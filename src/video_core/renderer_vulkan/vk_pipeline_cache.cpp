@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
