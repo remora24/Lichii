@@ -2127,7 +2127,7 @@ void PipelineCache::EvictUnusedPipelines() {
         std::vector<Candidate> candidates;
         candidates.reserve(graphics_cache.size());
         for (const auto& [key, pipeline] : graphics_cache) {
-            if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
+            if (pipeline == nullptr || pipeline.get() == current_pipeline || !pipeline->IsBuilt() ||
                 pipeline->WasUsed() || pipeline->LastUse() >= cutoff) {
                 continue;
             }
