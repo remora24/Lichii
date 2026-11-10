@@ -386,7 +386,7 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     const VkDescriptorSet depth_set = depth_descriptor_sets[0];
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, frame, in, depth_set](vk::CommandBuffer command) mutable {
+    scheduler.Record([this, frame, in, depth_set](vk::CommandBuffer command) {
         constexpr VkAccessFlags OUTPUT_READ_WRITE =
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         boost::container::static_vector<VkImageMemoryBarrier, 4> before{
@@ -411,8 +411,9 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         command.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 0, {}, {}, converted_depth_ready);
-        frame.cmdbuf = *command;
-        if (!linux_upscaler->Record(frame)) {
+        Fsr411::Frame recorded_frame = frame;
+        recorded_frame.cmdbuf = *command;
+        if (!linux_upscaler->Record(recorded_frame)) {
             if (!failed.exchange(true)) {
                 LOG_ERROR(Render_Vulkan, "Linux FSR 4.1.2: {}; reverting to FSR 3.1",
                           linux_upscaler->Error());
