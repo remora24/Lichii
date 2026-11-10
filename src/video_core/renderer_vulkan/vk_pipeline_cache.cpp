@@ -2062,10 +2062,79 @@ void PipelineCache::EvictUnusedPipelines() {
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
     const u64 tick = scheduler.CurrentTick();
-    // ~0.9 GB of driver memory at ~0.45 MB each.
-    constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
+    // At ~0.45 MiB each, 2000 prebuilt pipelines use about 0.9 GiB of driver
+    // memory. Some games have many more pipelines prebuilt from the disk cache,
+    // though, and evicting those before their first use causes a full translation
+    // on the GPU thread when the game later enters that area.
+    // Keep the original 2000-pipeline budget unless explicitly overridden.
+    static const size_t MaxUnusedPrebuiltPipelines = [] {
+        constexpr size_t DefaultLimit = 2000;
+        constexpr size_t MaximumLimit = 4000;
+        const char* value = std::getenv("EDEN_NX2_PREBUILT_KEEP_LIMIT");
+        if (value == nullptr || *value == '\0') {
+            return DefaultLimit;
+        }
+        char* end{};
+        const unsigned long long requested = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0' || requested < DefaultLimit ||
+            requested > MaximumLimit) {
+            LOG_WARNING(Render_Vulkan,
+                        "Invalid EDEN_NX2_PREBUILT_KEEP_LIMIT={} (valid {}-{}); "
+                        "using {}", value, DefaultLimit, MaximumLimit, DefaultLimit);
+            return DefaultLimit;
+        }
+        LOG_INFO(Render_Vulkan, "Prebuilt graphics pipeline protection: {} (default {})",
+                 requested, DefaultLimit);
+        return static_cast<size_t>(requested);
+    }();
+    // Preserve the old selection policy by default. With the opt-in policy,
+    // give prebuilt pipelines from the most recent recorded session precedence
+    // instead of protecting whichever keys unordered_map iterates first.
+    static const bool PreferRecentlyUsed = [] {
+        const char* value = std::getenv("EDEN_NX2_PREBUILT_PRIORITY");
+        const bool enabled = value != nullptr && value[0] == '1';
+        if (enabled) {
+            LOG_INFO(Render_Vulkan,
+                     "Protecting prebuilt pipelines by previous-session recency");
+        }
+        return enabled;
+    }();
+    std::unordered_set<const GraphicsPipeline*> prioritized_prebuilt;
+    if (PreferRecentlyUsed) {
+        struct Candidate {
+            const GraphicsPipeline* pipeline;
+            u8 age;
+            u64 hash;
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(graphics_cache.size());
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
+                pipeline->WasUsed() || pipeline->LastUse() >= cutoff) {
+                continue;
+            }
+            const u64 hash = key.Hash();
+            const auto used = used_pipelines.find(hash);
+            candidates.push_back({
+                pipeline.get(),
+                used != used_pipelines.end() ? used->second : std::numeric_limits<u8>::max(),
+                hash,
+            });
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
+                                                            const Candidate& b) {
+            return a.age != b.age ? a.age < b.age : a.hash < b.hash;
+        });
+        prioritized_prebuilt.reserve(std::min(MaxUnusedPrebuiltPipelines, candidates.size()));
+        for (size_t index = 0;
+             index < std::min(MaxUnusedPrebuiltPipelines, candidates.size()); ++index) {
+            prioritized_prebuilt.insert(candidates[index].pipeline);
+        }
+    }
     size_t kept_prebuilt = 0;
     size_t evicted = 0;
+    size_t evicted_used = 0;
+    size_t evicted_prebuilt = 0;
     for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
         GraphicsPipeline* const pipeline = it->second.get();
         if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
@@ -2078,10 +2147,17 @@ void PipelineCache::EvictUnusedPipelines() {
         // GPU thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
         // 684 rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a
         // large cache can't hold their driver memory for the whole session.
-        if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
+        if (!pipeline->WasUsed() &&
+            (PreferRecentlyUsed ? prioritized_prebuilt.contains(pipeline)
+                                : kept_prebuilt < MaxUnusedPrebuiltPipelines)) {
             ++kept_prebuilt;
             ++it;
             continue;
+        }
+        if (pipeline->WasUsed()) {
+            ++evicted_used;
+        } else {
+            ++evicted_prebuilt;
         }
         if (used_this_session.erase(pipeline) != 0) {
             used_and_evicted.insert(it->first.Hash());
@@ -2099,8 +2175,11 @@ void PipelineCache::EvictUnusedPipelines() {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    LOG_INFO(Render_Vulkan,
+             "Evicted {} graphics pipelines unused for {} frames, {} left "
+             "(used={} not-yet-used={} protected-prebuilt={} priority={})",
+             evicted, EvictAfterFrames, graphics_cache.size(), evicted_used,
+             evicted_prebuilt, kept_prebuilt, PreferRecentlyUsed);
 }
 
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
