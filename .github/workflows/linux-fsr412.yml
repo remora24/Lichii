@@ -1,9 +1,12 @@
 name: Linux FSR 4.1.2 experimental build
 
 on:
+  pull_request:
+    branches:
+      - nx2
   push:
     branches:
-      - feature/linux-fsr412-beamng
+      - nx2
   workflow_dispatch:
 
 permissions:
