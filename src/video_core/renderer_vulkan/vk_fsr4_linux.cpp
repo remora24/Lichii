@@ -76,8 +76,6 @@ bool Fsr4Upscaler::IsWanted(const Device& device) {
     const bool checkbox_enabled = Settings::values.amd_fsr4.GetValue();
     const bool env_enabled = EnvironmentEnabled("LICHII_FSR412_EXPERIMENTAL");
     if (!checkbox_enabled && !env_enabled) {
-        LOG_INFO(Render_Vulkan,
-                 "Linux FSR 4.1.2: not requested (checkbox=false, experimental_env=false)");
         return false;
     }
     if (device.GetVendorID() != 0x1002) {
@@ -112,9 +110,9 @@ Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
 
-    // Vulkan device features are enabled before creation only when the opt-in
-    // environment flag is set. The portable FSR 4 prepass avoids optional
-    // mixed-float dot product and subgroup-size dependencies.
+    // The opt-in native build enables the required Vulkan features on AMD
+    // devices at device creation, allowing the checkbox to work without a
+    // separate environment flag.
     if (!device.IsNativeFsr412Supported()) {
         LOG_WARNING(Render_Vulkan, "Linux FSR 4.1.2: required shader/derivative "
                     "features unavailable; using FSR 3.1");
