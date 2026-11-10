@@ -366,9 +366,8 @@ add_library(video_core STATIC
     video_core.h
 )
 
-
 # Experimental native Linux FSR 4.1.2 backend, based on BeamNG's independent Vulkan
-# implementation. Disabled by default until device-feature, depth and parity validation.
+# implementation. Disabled by default; requires an external source checkout and assets.
 option(ENABLE_LICHII_LINUX_FSR412 "Build experimental BeamNG-derived Linux FSR 4.1.2 backend" OFF)
 set(LICHII_BEAMNG_FSR412_ROOT "" CACHE PATH
     "Checkout of Mob1K7105/beamng-fsr4-linux (v0.2.1), containing fsr411/ and assets/")
