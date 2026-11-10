@@ -1296,7 +1296,21 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
         if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+            scheduler.Record([this](vk::CommandBuffer) {
+                const VideoCommon::Nx2Profile::Scope scope{
+                    VideoCommon::Nx2Profile::Zone::PipelineWait};
+                const auto begin = std::chrono::steady_clock::now();
+                build->Wait(!worker_only_build);
+                const auto elapsed = std::chrono::steady_clock::now() - begin;
+                if (VideoCommon::StutterTrace::Enabled() &&
+                    elapsed >= std::chrono::milliseconds{25}) {
+                    LOG_INFO(Render_Vulkan,
+                             "Nx2PipelineWait kind=mesh pipeline={:016x} wait_ms={:.1f} "
+                             "worker_only={}",
+                             key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count(),
+                             worker_only_build);
+                }
+            });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
@@ -1431,10 +1445,18 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             build->Wait(!worker_only_build);
-            hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now() - begin)
+            const auto elapsed = std::chrono::steady_clock::now() - begin;
+            hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed)
                                        .count(),
                                    std::memory_order::relaxed);
+            if (VideoCommon::StutterTrace::Enabled() &&
+                elapsed >= std::chrono::milliseconds{25}) {
+                LOG_INFO(Render_Vulkan,
+                         "Nx2PipelineWait kind=graphics pipeline={:016x} wait_ms={:.1f} "
+                         "worker_only={}",
+                         key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count(),
+                         worker_only_build);
+            }
         });
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
