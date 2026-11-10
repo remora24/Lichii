@@ -527,11 +527,26 @@ FN_MAX_LIMIT_LIST
     }
 
     /// Required by the BeamNG-derived native FSR 4.1.2 INT8 shaders.
-    bool IsNativeFsr412Supported() const {
-        return extensions.compute_shader_derivatives &&
-               features.compute_shader_derivatives.computeDerivativeGroupQuads &&
-               features.shader_float16_int8.shaderInt8 && features.features.shaderInt16 &&
-               native_fsr412_integer_dot_product;
+    /// When requested by the Linux adapter, report individual capability gates
+    /// rather than silently falling back to FSR 3.1.
+    bool IsNativeFsr412Supported(bool log_details = false) const {
+        const bool derivatives = extensions.compute_shader_derivatives;
+        const bool derivative_quads =
+            features.compute_shader_derivatives.computeDerivativeGroupQuads != VK_FALSE;
+        const bool shader_int8 = features.shader_float16_int8.shaderInt8 != VK_FALSE;
+        const bool shader_int16 = features.features.shaderInt16 != VK_FALSE;
+        const bool integer_dot_product = native_fsr412_integer_dot_product;
+        const bool supported = derivatives && derivative_quads && shader_int8 && shader_int16 &&
+                               integer_dot_product;
+        if (log_details) {
+            LOG_INFO(Render_Vulkan,
+                     "Linux FSR 4.1.2 capabilities: derivatives_extension_enabled={} "
+                     "computeDerivativeGroupQuads={} shaderInt8={} shaderInt16={} "
+                     "shaderIntegerDotProduct={} supported={}",
+                     derivatives, derivative_quads, shader_int8, shader_int16,
+                     integer_dot_product, supported);
+        }
+        return supported;
     }
 
     /// Returns true if the device allows 8-bit integer members in uniform/storage buffers.
