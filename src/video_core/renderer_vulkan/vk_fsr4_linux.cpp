@@ -3,7 +3,7 @@
 
 // Experimental native Linux adapter to Mob1K7105/beamng-fsr4-linux's Vulkan
 // FSR 4.1.2 INT8 upscaler. The implementation and AMD-derived assets are external
-// to Lichii. See docs/linux-fsr412-beamng.md before enabling this backend.
+// to Lichii and must be supplied separately.
 
 #include <array>
 #include <cstdlib>
