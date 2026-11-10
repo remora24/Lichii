@@ -171,12 +171,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Works on any supported Vulkan GPU. NVIDIA DLSS takes precedence when enabled and "
               "available. RCAS Sharpness controls sharpening. Takes effect when a game starts."));
 #if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
-    INSERT(Settings, amd_fsr4, tr("Use native FSR 4.1.2 (Linux, experimental)"),
-           tr("Uses an unofficial INT8 FSR 4.1.2 Vulkan implementation in games "
-              "where AMD FSR 3.1 replaces the native upscaler (Ocarina of Time). "
-              "Requires supported AMD RADV and the shader/model asset directory: "
-              "set LICHII_FSR412_ASSETS_DIR before starting Lichii. "
-              "FSR 3.1 is used if FSR 4.1.2 cannot initialize. "
+    INSERT(Settings, amd_fsr4,
+           tr("Use native FSR 4.1.2 upscaling in Ocarina of Time (Linux, experimental)"),
+           tr("Replaces Ocarina of Time's native upscaler with an unofficial INT8 "
+              "FSR 4.1.2 Vulkan implementation. Enable this setting by itself; "
+              "the AMD FSR 3.1 checkbox is not required. FSR 3.1 is used "
+              "automatically if FSR 4.1.2 cannot initialize or dispatch. "
+              "Requires supported AMD RADV and shader/model assets: set "
+              "LICHII_FSR412_ASSETS_DIR before starting Lichii. "
               "Takes effect on the next game launch."));
 #else
     INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of FSR 3.1"),
