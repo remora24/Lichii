@@ -52,20 +52,24 @@ set -x LICHII_FSR412_ASSETS_DIR (realpath ../beamng-fsr4-linux/assets)
 ./build/bin/lichii
 ```
 
-In Lichii's Graphics settings, choose the AMD RADV Vulkan device, then check:
+In Lichii's Graphics settings, choose the AMD RADV Vulkan device and enable:
 
-- **Use AMD FSR 3.1 upscaling in Ocarina of Time**
-- **Use native FSR 4.1.2 (Linux, experimental)**
+- **Use native FSR 4.1.2 upscaling in Ocarina of Time (Linux, experimental)**
 
-Start or restart Ocarina after applying the settings. No official AMD DLL
+You do **not** need to enable the separate FSR 3.1 checkbox. FSR 4.1.2
+selects Ocarina's upscaling replacement path itself and automatically falls
+back to FSR 3.1 if initialization or dispatch fails.
+
+Start or restart Ocarina after applying the setting. No official AMD DLL
 download is necessary. The checkbox appears only in opt-in Linux builds
 and on AMD RADV devices.
 
 Alternatively, for command-line diagnostics, set
 `LICHII_FSR412_EXPERIMENTAL=1` in the environment before starting the
 app; this bypasses the FSR 4 checkbox but still requires Ocarina's FSR
-replacement to be selected. To force the FSR 3.1 comparison, unset it and
-uncheck the FSR 4 setting.
+replacement to be selected through the FSR 3.1 checkbox.
+To compare FSR 3.1 alone, unset that environment variable, disable the
+FSR 4.1.2 setting, and enable the FSR 3.1 setting.
 
 ## What this branch implements
 
