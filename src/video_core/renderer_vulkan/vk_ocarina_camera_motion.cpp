@@ -1104,9 +1104,15 @@ VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device) 
 #ifdef EGLANTINE_STREAMLINE
     dlss_available = Streamline::IsDlssAvailable();
 #endif
+    bool fsr_enabled = Settings::values.ocarina_fsr.GetValue();
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    // Enabling native Linux FSR 4.1.2 also selects the Ocarina replacement
+    // path. FSR 3.1 remains an automatic fallback; its checkbox is not needed.
+    fsr_enabled = fsr_enabled || Settings::values.amd_fsr4.GetValue();
+#endif
     const auto backend = VideoCommon::SelectOcarinaUpscaler(
-        Settings::values.ocarina_fsr.GetValue(), Settings::values.nvidia_dlss.GetValue(),
-        dlss_available, value ? value : "");
+        fsr_enabled, Settings::values.nvidia_dlss.GetValue(), dlss_available,
+        value ? value : "");
     if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr && !Fsr3Upscaler::IsSupported(device)) {
         return VideoCommon::OcarinaUpscaleBackend::Native;
     }
