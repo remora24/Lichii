@@ -1380,6 +1380,10 @@ private:
     Features features{};
     Properties properties{};
 
+    // These structs remain in features2.pNext through vkCreateDevice.
+    // In particular, native FSR 4 needs Vulkan 1.3 shaderIntegerDotProduct.
+    VkPhysicalDeviceVulkan12Features features_1_2{};
+    VkPhysicalDeviceVulkan13Features features_1_3{};
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
     VkPhysicalDeviceProperties2 properties2{};
