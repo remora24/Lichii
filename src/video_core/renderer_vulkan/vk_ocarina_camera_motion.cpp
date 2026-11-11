@@ -726,7 +726,7 @@ struct OcarinaUpscaler::Impl {
         if (!Fsr3Upscaler::IsSupported(device)) {
             throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
         }
-        fsr = std::make_unique<Fsr3Upscaler>(device, scheduler, allocator, staging, pool, queue,
+        fsr = std::make_unique<Fsr3Upscaler>(device, scheduler, allocator, staging, pool_, queue,
                                            Fsr3Upscaler::Profile::OcarinaLdr);
     }
 
