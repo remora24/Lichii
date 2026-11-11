@@ -2626,6 +2626,12 @@ public:
             u32 stop_shader_mask;
         };
 
+        // Native C597/C797 use SET_INDEX_BUFFER_SIZE_A/B, not the legacy C/D limit.
+        u64 NativeIndexBufferSize() const {
+            constexpr std::size_t method = 0x238 / sizeof(u32);
+            return (u64{reg_array[method] & 0xffU} << 32) | reg_array[method + 1];
+        }
+
         // Native C597/C797 use byte counts at 0x600 rather than legacy end addresses.
         u64 NativeVertexStreamSize(std::size_t index) const {
             const std::size_t method = 0x600 / sizeof(u32) + index * 2;

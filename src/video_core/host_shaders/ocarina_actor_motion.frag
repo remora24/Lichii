@@ -14,8 +14,6 @@ layout(push_constant) uniform DepthComparison {
 layout(std140, binding = 2, row_major) uniform Transforms {
     mat4 current_view_projection;
     mat4 previous_view_projection;
-    vec4 current_origin;
-    vec4 previous_origin;
     vec2 extent;
     vec2 jitter;
 } transforms;

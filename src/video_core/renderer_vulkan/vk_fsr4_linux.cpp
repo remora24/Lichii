@@ -1,21 +1,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Experimental native Linux adapter to Mob1K7105/beamng-fsr4-linux's Vulkan
-// FSR 4.1.2 INT8 upscaler. The implementation and AMD-derived assets are external
-// to Lichii and must be supplied separately.
+// Native Linux adapter to Mob1K7105/beamng-fsr4-linux's Vulkan FSR 4.1.2 INT8
+// upscaler. Native builds bundle the external implementation and AMD-derived
+// assets alongside the executable or under the installation's share directory.
 
 #include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
-#include <string>
+#include <system_error>
 
 #include <boost/container/static_vector.hpp>
 
 #include "common/logging.h"
 #include "common/settings.h"
-#include "video_core/host_shaders/ocarina_fsr4_depth_comp_spv.h"
 #include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -101,14 +100,37 @@ bool Fsr4Upscaler::IsWanted(const Device& device) {
 Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
                            MemoryAllocator& memory_allocator_)
     : device{device_}, scheduler{scheduler_}, memory_allocator{memory_allocator_} {
-    const char* dir = std::getenv("LICHII_FSR412_ASSETS_DIR");
-    if (dir == nullptr || dir[0] == '\0' ||
-        !std::filesystem::is_directory(dir)) {
+    std::error_code ec;
+    const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec || !exe.is_absolute()) {
         LOG_WARNING(Render_Vulkan,
-                    "Linux FSR 4.1.2: set LICHII_FSR412_ASSETS_DIR to BeamNG's "
-                    "assets directory; using FSR 3.1");
+                    "Linux FSR 4.1.2: cannot resolve /proc/self/exe to locate bundled "
+                    "assets ({}); using FSR 3.1",
+                    ec ? ec.message() : "executable path is not absolute");
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
+    const auto exe_dir = exe.parent_path();
+    const std::array candidates{
+        exe_dir / "fsr412" / "assets",
+        exe_dir.parent_path() / "share" / "lichii" / "fsr412" / "assets",
+    };
+    std::filesystem::path assets_dir;
+    for (const auto& candidate : candidates) {
+        // Check one bundle marker; the backend loads the selected shader variant.
+        if (std::filesystem::is_regular_file(candidate / "t1080_m0" / "initializer.bin", ec)) {
+            assets_dir = candidate;
+            break;
+        }
+    }
+    if (assets_dir.empty()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Linux FSR 4.1.2: bundled assets missing or inaccessible at '{}' and '{}'; "
+                    "reinstall a complete native FSR 4.1.2 package or rebuild its bundled assets; "
+                    "using FSR 3.1",
+                    candidates[0].string(), candidates[1].string());
+        throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
+    }
+    LOG_INFO(Render_Vulkan, "Linux FSR 4.1.2: using bundled assets at '{}'", assets_dir.string());
 
     // The opt-in native build enables the required Vulkan features on AMD
     // devices at device creation, allowing the checkbox to work without a
@@ -128,10 +150,9 @@ Fsr4Upscaler::Fsr4Upscaler(const Device& device_, Scheduler& scheduler_,
 
     linux_upscaler = std::make_unique<Fsr411::Upscaler>(
         static_cast<VkPhysicalDevice>(device.GetPhysical()),
-        *device.GetLogical(), std::string{dir}, false, false);
-    CreateDepthPipeline();
+        *device.GetLogical(), assets_dir.string(), false, false);
     LOG_INFO(Render_Vulkan,
-             "Linux FSR 4.1.2: native INT8 backend initialized with reversed-depth converter");
+             "Linux FSR 4.1.2: native INT8 backend initialized with standard depth");
 }
 
 Fsr4Upscaler::~Fsr4Upscaler() {
@@ -155,112 +176,6 @@ bool Fsr4Upscaler::CreateContext(VkExtent2D render_size, VkExtent2D upscale_size
     return true; // The BeamNG backend allocates its internal context on Record().
 }
 
-void Fsr4Upscaler::CreateDepthPipeline() {
-    const auto& logical = device.GetLogical();
-    const std::array bindings{
-        VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
-                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    depth_set_layout = logical.CreateDescriptorSetLayout({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = static_cast<u32>(bindings.size()),
-        .pBindings = bindings.data(),
-    });
-    const std::array pool_sizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
-    };
-    depth_descriptor_pool = logical.CreateDescriptorPool({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 1,
-        .poolSizeCount = static_cast<u32>(pool_sizes.size()),
-        .pPoolSizes = pool_sizes.data(),
-    });
-    const VkDescriptorSetLayout raw_layout = *depth_set_layout;
-    depth_descriptor_sets = depth_descriptor_pool.Allocate({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = *depth_descriptor_pool,
-        .descriptorSetCount = 1,
-        .pSetLayouts = &raw_layout,
-    });
-    depth_pipeline_layout = logical.CreatePipelineLayout({
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &raw_layout,
-    });
-    depth_sampler = logical.CreateSampler({
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = VK_FILTER_NEAREST,
-        .minFilter = VK_FILTER_NEAREST,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .maxLod = 1.0f,
-    });
-    const auto shader = logical.CreateShaderModule({
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = sizeof(OCARINA_FSR4_DEPTH_COMP_SPV),
-        .pCode = std::data(OCARINA_FSR4_DEPTH_COMP_SPV),
-    });
-    depth_pipeline = logical.CreateComputePipeline({
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = *shader,
-            .pName = "main",
-        },
-        .layout = *depth_pipeline_layout,
-    });
-}
-
-void Fsr4Upscaler::CreateReversedDepth(VkExtent2D size) {
-    if (reversed_depth_image) {
-        scheduler.Finish();
-        reversed_depth_view.reset();
-        reversed_depth_image.reset();
-    }
-    reversed_depth_image = memory_allocator.CreateImage({
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format = VK_FORMAT_R32_SFLOAT,
-        .extent = {size.width, size.height, 1},
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    });
-    reversed_depth_view = device.GetLogical().CreateImageView({
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = *reversed_depth_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = VK_FORMAT_R32_SFLOAT,
-        .subresourceRange = COLOR_RANGE,
-    });
-    reversed_depth_extent = size;
-    scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([image = *reversed_depth_image](vk::CommandBuffer command) {
-        const VkImageMemoryBarrier init{
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresourceRange = COLOR_RANGE,
-        };
-        command.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                0, {}, {}, init);
-    });
-}
 
 void Fsr4Upscaler::CreateOutput(VkExtent2D size) {
     if (output_image) {
@@ -339,7 +254,6 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
             return false;
         }
         CreateOutput(in.upscale_size);
-        CreateReversedDepth(in.render_size);
     }
 
     // Cache input views, recreating them only when Lichii swaps the underlying
@@ -366,12 +280,11 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     const VkImageView depth = view_for(linux_depth, in.depth);
     const VkImageView motion = view_for(linux_motion, in.motion_vectors);
 
-    // The prepass takes the numeric reversed-Z values, stored in a sampled
-    // R32F color image to avoid writing to a Vulkan depth attachment.
+    // The bundled prepass dilates motion from the minimum depth in its neighborhood.
+    // Ocarina already supplies standard depth (near = 0), so do not reverse it.
     const Fsr411::Frame frame{
         .color = {in.color.image, color, in.render_size.width, in.render_size.height},
-        .depth = {*reversed_depth_image, *reversed_depth_view,
-                  in.render_size.width, in.render_size.height},
+        .depth = {in.depth.image, depth, in.render_size.width, in.render_size.height},
         .motion = {in.motion_vectors.image, motion, in.render_size.width, in.render_size.height},
         .output = {*output_image, *output_view, in.upscale_size.width, in.upscale_size.height},
         .render_width = in.render_size.width,
@@ -387,26 +300,9 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         .auto_exposure = false, // Tonemapped color; use identity exposure.
     };
 
-    // The mapped descriptor set is updated only after the preceding GPU
-    // completion. Do not update it while the old shader might still use it.
-    const std::array image_infos{
-        VkDescriptorImageInfo{*depth_sampler, depth, VK_IMAGE_LAYOUT_GENERAL},
-        VkDescriptorImageInfo{VK_NULL_HANDLE, *reversed_depth_view, VK_IMAGE_LAYOUT_GENERAL},
-    };
-    const std::array writes{
-        VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                             depth_descriptor_sets[0], 0, 0, 1,
-                             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                             &image_infos[0]},
-        VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                             depth_descriptor_sets[0], 1, 0, 1,
-                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &image_infos[1]},
-    };
-    device.GetLogical().UpdateDescriptorSets(writes, {});
-    const VkDescriptorSet depth_set = depth_descriptor_sets[0];
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, frame, in, depth_set](vk::CommandBuffer command) {
+    scheduler.Record([this, frame, in](vk::CommandBuffer command) {
         constexpr VkAccessFlags OUTPUT_READ_WRITE =
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         boost::container::static_vector<VkImageMemoryBarrier, 4> before{
@@ -418,19 +314,6 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         command.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, before);
 
-        // The Ocarina depth is forward-Z; the independent FSR 4 prepass
-        // requires reversed-Z. Convert it before any FSR 4 shader reads it.
-        command.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *depth_pipeline);
-        command.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
-                                   *depth_pipeline_layout, 0, depth_set, {});
-        command.Dispatch((in.render_size.width + 7) / 8,
-                         (in.render_size.height + 7) / 8, 1);
-        const auto converted_depth_ready = Barrier(
-            frame.depth.image, COLOR_RANGE,
-            VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-        command.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                0, {}, {}, converted_depth_ready);
         Fsr411::Frame recorded_frame = frame;
         recorded_frame.cmdbuf = *command;
         if (!linux_upscaler->Record(recorded_frame)) {

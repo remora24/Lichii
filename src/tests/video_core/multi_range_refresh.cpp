@@ -96,13 +96,15 @@ TEST_CASE("Deleted segment IDs are forgotten before a slot can be reused",
     REQUIRE_FALSE(VideoCommon::MultiRangeSegmentsLive(std::span<const Segment>{graphics}, live));
     REQUIRE_FALSE(VideoCommon::MultiRangeSegmentsLive(std::span<const Segment>{compute}, live));
     std::vector<u64> resolved;
+    std::vector<u32> resolved_sizes;
     REQUIRE(VideoCommon::RefreshMultiRangeSegments(
         std::span{graphics}, live, [&](u64 address, u32 size) {
             resolved.push_back(address);
-            CHECK(size == 16);
+            resolved_sizes.push_back(size);
             return 2U;
         }));
     REQUIRE(resolved == std::vector<u64>{0x2000});
+    REQUIRE(resolved_sizes == std::vector<u32>{16});
 }
 
 TEST_CASE("A merge while resolving a later segment re-resolves earlier segments",
