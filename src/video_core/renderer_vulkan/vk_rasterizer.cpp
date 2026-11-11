@@ -1066,7 +1066,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 
     TrackOcarinaCamera();
-    TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect, instance_count);
+    {
+        Profile::Scope scope{Profile::Zone::OcarinaActors};
+        TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect, instance_count);
+    }
     TracePendingCpuWrites(false, pipeline->ShaderHashes());
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
     if (frame_dump.Capturing()) {
@@ -2926,8 +2929,10 @@ void RasterizerVulkan::BeginOcarinaActorFrame() {
     oot_actor_history.BeginFrame(render_trace_frame);
     oot_actor_motion.Clear();
     oot_actor_parts.clear();
-    oot_actor_vertices.clear();
-    oot_actor_indices.clear();
+    // Geometry no actor drew for two seconds is gone or replaced.
+    std::erase_if(oot_actor_geometry, [this](const OcarinaActorGeometry& geometry) {
+        return geometry.last_frame + 120 < render_trace_frame;
+    });
     oot_actor_pose_pairs.clear();
     oot_actor_rejections.fill(0);
     oot_actor_duplicates = 0;
@@ -3147,6 +3152,8 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         note("layout");
         return;
     }
+    std::optional<VideoCommon::Nx2Profile::Scope> pose_scope{
+        std::in_place, VideoCommon::Nx2Profile::Zone::OcarinaActorPose};
     const std::array<f32, 4> origin{
         std::bit_cast<f32>(actor[4]), std::bit_cast<f32>(actor[5]),
         std::bit_cast<f32>(actor[6]), 0.0f,
@@ -3207,6 +3214,9 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         reject(reason);
         note(why);
     };
+    pose_scope.reset();
+    const VideoCommon::Nx2Profile::Scope geometry_scope{
+        VideoCommon::Nx2Profile::Zone::OcarinaActorGeometry};
     const size_t indices_size = size_t{key.index_count} * index_bytes;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const u64 native_index_size = native ? regs.NativeIndexBufferSize() : 0;
@@ -3221,37 +3231,59 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         reject_geometry(Rejection::Indices, indices_in_bounds ? "index-unreadable" : "index-bounds");
         return;
     }
-    oot_actor_raw_indices.resize(indices_size);
-    device_memory.ReadBlockUnsafe(*index_device, oot_actor_raw_indices.data(), indices_size);
+    // Guest bytes in place when one mapping holds them, else copied into `staging`.
+    const auto guest_bytes = [&](DAddr address, size_t size,
+                                 std::vector<u8>& staging) -> std::span<const u8> {
+        if (const u8* span = device_memory.GetSpan(address, size)) {
+            return {span, size};
+        }
+        staging.resize(size);
+        device_memory.ReadBlockUnsafe(address, staging.data(), size);
+        return staging;
+    };
+    const auto raw_indices = guest_bytes(*index_device, indices_size, oot_actor_raw_indices);
+    const bool restart = regs.primitive_restart.enabled != 0;
+    const u32 restart_index = regs.primitive_restart.index;
+    auto cached = std::ranges::find(oot_actor_geometry, key, &OcarinaActorGeometry::key);
+    const bool indices_cached =
+        cached != oot_actor_geometry.end() && cached->restart == restart &&
+        (!restart || cached->restart_index == restart_index) &&
+        std::ranges::equal(cached->raw_indices, raw_indices);
     const auto read_index = [&](size_t index) {
         u32 value{};
         if (index_bytes == 2) {
             u16 small;
-            std::memcpy(&small, oot_actor_raw_indices.data() + index * 2, sizeof(small));
+            std::memcpy(&small, raw_indices.data() + index * 2, sizeof(small));
             value = small;
         } else {
-            std::memcpy(&value, oot_actor_raw_indices.data() + index * 4, sizeof(value));
+            std::memcpy(&value, raw_indices.data() + index * 4, sizeof(value));
         }
         return value;
     };
     u32 minimum = std::numeric_limits<u32>::max();
-    u32 maximum{};
-    for (size_t index = 0; index < key.index_count; ++index) {
-        const u32 value = read_index(index);
-        if (regs.primitive_restart.enabled && value == regs.primitive_restart.index) {
-            reject_geometry(Rejection::Indices, "primitive-restart");
-            return;
+    u64 vertex_count{};
+    if (indices_cached) {
+        minimum = cached->minimum;
+        vertex_count = cached->vertex_count;
+    } else {
+        u32 maximum{};
+        for (size_t index = 0; index < key.index_count; ++index) {
+            const u32 value = read_index(index);
+            if (restart && value == restart_index) {
+                reject_geometry(Rejection::Indices, "primitive-restart");
+                return;
+            }
+            minimum = std::min(minimum, value);
+            maximum = std::max(maximum, value);
         }
-        minimum = std::min(minimum, value);
-        maximum = std::max(maximum, value);
+        vertex_count = u64{maximum} - minimum + 1;
     }
     const s64 first_vertex = s64{key.base_vertex} + minimum;
-    const u64 vertex_count = u64{maximum} - minimum + 1;
     if (first_vertex < 0 ||
         static_cast<u64>(first_vertex) >
             (std::numeric_limits<GPUVAddr>::max() - key.vertices) / layout.stride ||
         vertex_count > std::numeric_limits<size_t>::max() / layout.stride ||
-        vertex_count > std::numeric_limits<u32>::max() - oot_actor_vertices.size()) {
+        vertex_count > std::numeric_limits<u32>::max()) {
         reject_geometry(Rejection::Vertices, "vertex-range");
         return;
     }
@@ -3271,29 +3303,40 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
                         vertices_in_bounds ? "vertex-unreadable" : "vertex-bounds");
         return;
     }
-    oot_actor_raw_vertices.resize(vertices_size);
-    device_memory.ReadBlockUnsafe(*vertex_device, oot_actor_raw_vertices.data(), vertices_size);
-    const size_t first_output_vertex = oot_actor_vertices.size();
-    if (!VideoCommon::AppendOcarinaActorVertices(oot_actor_raw_vertices, layout, 0,
-                                                oot_actor_vertices)) {
-        reject_geometry(Rejection::Vertices, "vertex-decode");
-        return;
+    const auto raw_vertices = guest_bytes(*vertex_device, vertices_size, oot_actor_raw_vertices);
+    if (!indices_cached || !std::ranges::equal(cached->raw_vertices, raw_vertices)) {
+        // Decode before touching the cache, so a rejected draw leaves the last good entry.
+        std::vector<VideoCommon::OcarinaActorVertex> vertices;
+        if (!VideoCommon::AppendOcarinaActorVertices(raw_vertices, layout, 0, vertices)) {
+            reject_geometry(Rejection::Vertices, "vertex-decode");
+            return;
+        }
+        if (cached == oot_actor_geometry.end()) {
+            cached = oot_actor_geometry.insert(oot_actor_geometry.end(), {.key = key});
+        }
+        if (!indices_cached) {
+            cached->restart = restart;
+            cached->restart_index = restart_index;
+            cached->raw_indices.assign(raw_indices.begin(), raw_indices.end());
+            cached->minimum = minimum;
+            cached->vertex_count = vertex_count;
+            cached->indices.resize(key.index_count);
+            for (size_t index = 0; index < key.index_count; ++index) {
+                cached->indices[index] = read_index(index) - minimum;
+            }
+        }
+        cached->raw_vertices.assign(raw_vertices.begin(), raw_vertices.end());
+        cached->vertices = std::move(vertices);
     }
-    auto& part = oot_actor_parts[observation.index];
-    part = {
-        .first_vertex = first_output_vertex,
-        .vertex_count = static_cast<size_t>(vertex_count),
-        .first_index = oot_actor_indices.size(),
-        .index_count = key.index_count,
+    cached->last_frame = render_trace_frame;
+    oot_actor_parts[observation.index] = {
+        .geometry = static_cast<size_t>(cached - oot_actor_geometry.begin()),
         .extent = oot_motion.extent,
         .view_projection = view_projection,
         .shader_hash = shader_hash,
         .influences = influences,
         .bone_count = bone_count,
     };
-    for (size_t index = 0; index < key.index_count; ++index) {
-        oot_actor_indices.push_back(read_index(index) - minimum);
-    }
 }
 
 /// Assemble one batch only after every pass has had a chance to expose an ambiguous identity.
@@ -3304,10 +3347,15 @@ void RasterizerVulkan::ReadOcarinaActors() {
     for (size_t index = 0; index < entries.size(); ++index) {
         const auto& entry = entries[index];
         const auto& part = oot_actor_parts[index];
-        if (entry.ambiguous || part.vertex_count == 0 ||
+        if (entry.ambiguous || part.geometry >= oot_actor_geometry.size() ||
             entry.key.channel != gpu_memory || part.extent.width != oot_motion.extent.width ||
             part.extent.height != oot_motion.extent.height ||
             part.view_projection != oot_motion.current) {
+            continue;
+        }
+        const auto& geometry = oot_actor_geometry[part.geometry];
+        const auto& vertices = geometry.vertices;
+        if (vertices.size() > std::numeric_limits<u32>::max() - oot_actor_motion.vertices.size()) {
             continue;
         }
         if (!entry.previous_pose) {
@@ -3324,24 +3372,22 @@ void RasterizerVulkan::ReadOcarinaActors() {
                 oot_actor_history.PreviousPoses()[*entry.previous_pose]);
         }
         const u32 vertex_offset = static_cast<u32>(oot_actor_motion.vertices.size());
-        const auto vertices = std::span{oot_actor_vertices}.subspan(part.first_vertex,
-                                                                  part.vertex_count);
         oot_actor_motion.vertices.insert(oot_actor_motion.vertices.end(), vertices.begin(),
                                           vertices.end());
         for (auto& vertex : std::span{oot_actor_motion.vertices}.subspan(vertex_offset)) {
             vertex.pose_index = pose_index;
         }
-        for (const u32 value : std::span{oot_actor_indices}.subspan(part.first_index,
-                                                                  part.index_count)) {
+        for (const u32 value : geometry.indices) {
             oot_actor_motion.indices.push_back(vertex_offset + value);
         }
         if (std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr) {
             // Where the mesh sits (every 8th vertex, skinned with this frame's pose), to tell
             // which part of an actor a probe line is about.
             VideoCommon::OcarinaActorMeshInfo info{
-                .first_index = static_cast<u32>(oot_actor_motion.indices.size() - part.index_count),
-                .index_count = static_cast<u32>(part.index_count),
-                .vertex_count = static_cast<u32>(part.vertex_count),
+                .first_index = static_cast<u32>(oot_actor_motion.indices.size() -
+                                                geometry.indices.size()),
+                .index_count = static_cast<u32>(geometry.indices.size()),
+                .vertex_count = static_cast<u32>(vertices.size()),
                 .shader_hash = part.shader_hash,
                 .influences = part.influences,
                 .bone_count = part.bone_count,
@@ -3492,7 +3538,10 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format != output_format) {
         return fail("unsupported storage format");
     }
-    ReadOcarinaActors();
+    {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaActorAssembly};
+        ReadOcarinaActors();
+    }
     try {
         const auto target_view =
             target.StorageView(Shader::TextureType::Color2D, Shader::ImageFormat::Typeless, false);
@@ -3515,10 +3564,14 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         const VkExtent2D output_extent = native_resolution ? extent
                                          : upscale_4k      ? VkExtent2D{3840, 2160}
                                                            : target_extent;
-        const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
-                                                   extent, output_extent, target_extent, oot_motion.current,
-                                                   oot_motion.previous, oot_actor_motion, depth.ImageHandle(),
-                                                   render_trace_frame, jitter);
+        bool recorded;
+        {
+            VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaUpscale};
+            recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view, extent,
+                                             output_extent, target_extent, oot_motion.current,
+                                             oot_motion.previous, oot_actor_motion,
+                                             depth.ImageHandle(), render_trace_frame, jitter);
+        }
         if (!recorded) {
             return fail("temporal upscaler declined the frame");
         }

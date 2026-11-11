@@ -33,6 +33,10 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
   constant buffer 6 where some shader variants keep it in 7 (Link's hair, which is now replayed
   but still matches the scene depth on only about a quarter of its pixels). The contract trace
   now logs each rejected draw and measures per mesh how many visible fragments are written.
+- Cut the Ocarina actor capture's per-frame cost from about 1.5 ms to 0.5 ms of GPU-thread time
+  by keeping each skinned mesh's decoded geometry and reusing it while the guest bytes are
+  unchanged (they are compared every frame). `EDEN_NX2_GPU_PROFILE` reports the capture's
+  checks, pose, geometry and assembly time and the Ocarina upscale as separate zones.
 
 ## [0.1.0]
 

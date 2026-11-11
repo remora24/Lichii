@@ -329,10 +329,7 @@ private:
     VideoCommon::OcarinaActorHistory oot_actor_history;
     VideoCommon::OcarinaActorMotion oot_actor_motion;
     struct OcarinaActorPart {
-        size_t first_vertex{};
-        size_t vertex_count{};
-        size_t first_index{};
-        size_t index_count{};
+        size_t geometry = std::numeric_limits<size_t>::max(); ///< index into oot_actor_geometry
         VkExtent2D extent{};
         std::array<f32, 16> view_projection{};
         u64 shader_hash{};
@@ -340,9 +337,22 @@ private:
         u32 bone_count{};
     };
     std::vector<OcarinaActorPart> oot_actor_parts;
-    std::vector<VideoCommon::OcarinaActorVertex> oot_actor_vertices;
-    std::vector<u32> oot_actor_indices;
-    std::vector<u8> oot_actor_raw_vertices;
+    /// Decoded skinned geometry, reused while the guest bytes it came from are unchanged. Entries
+    /// are only dropped between frames, so a part's index stays valid within its frame.
+    struct OcarinaActorGeometry {
+        VideoCommon::OcarinaActorGeometryKey key;
+        bool restart{};
+        u32 restart_index{};
+        std::vector<u8> raw_indices;
+        std::vector<u8> raw_vertices;
+        u32 minimum{};
+        u64 vertex_count{};
+        std::vector<VideoCommon::OcarinaActorVertex> vertices;
+        std::vector<u32> indices; ///< relative to the first vertex
+        u64 last_frame{};
+    };
+    std::vector<OcarinaActorGeometry> oot_actor_geometry;
+    std::vector<u8> oot_actor_raw_vertices; ///< staging when guest bytes span mappings
     std::vector<u8> oot_actor_raw_indices;
     /// Fallback staging for the bone constants when they span more than one mapping.
     std::array<u8, VideoCommon::OcarinaActorBoneCount * 12 * sizeof(f32)> oot_actor_raw_pose{};
