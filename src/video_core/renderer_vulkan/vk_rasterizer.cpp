@@ -3358,9 +3358,10 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     const auto read_index = [&](size_t index) {
         u32 value{};
         if (index_bytes == 2) {
-            u16 small;
-            std::memcpy(&small, raw_indices.data() + index * 2, sizeof(small));
-            value = small;
+            // Not `small`: Windows headers define it as a macro.
+            u16 index16;
+            std::memcpy(&index16, raw_indices.data() + index * 2, sizeof(index16));
+            value = index16;
         } else {
             std::memcpy(&value, raw_indices.data() + index * 4, sizeof(value));
         }
