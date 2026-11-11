@@ -2981,10 +2981,10 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         DAddr device{};
         u32 size{};
     };
-    std::array<BoundConstant, 7> constants{};
+    std::array<BoundConstant, 8> constants{};
     buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
                                                 const auto& binding, u32 size, const auto*, u32) {
-        if (stage == 0 && !storage && (index == 3 || index == 4 || index == 6)) {
+        if (stage == 0 && !storage && (index == 3 || index == 4 || index == 6 || index == 7)) {
             // Uniform-cache bindings retain only the device address, not the guest GPU address.
             const auto& constant = maxwell3d->state.shader_stages[stage].const_buffers[index];
             if (constant.enabled) {
@@ -3006,10 +3006,13 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         }
         return device_address;
     };
+    // Shader variants with a material block in constant buffer 6 (Link's hair, some enemies)
+    // keep the bone palette in 7. Only buffers the bound vertex shader reads are visited above.
+    const BoundConstant& palette = constants[7].size != 0 ? constants[7] : constants[6];
     constexpr size_t bone_stride = 12 * sizeof(f32);
     constexpr size_t max_bone_bytes = VideoCommon::OcarinaActorBoneCount * bone_stride;
     const u32 bone_count = std::min(VideoCommon::OcarinaActorBoneCount,
-                                    static_cast<u32>(constants[6].size / bone_stride));
+                                    static_cast<u32>(palette.size / bone_stride));
     const size_t bone_bytes = size_t{bone_count} * bone_stride;
     if (constants[3].size < 0x70 || constants[4].size < 0x50 || bone_count == 0) {
         reject(Rejection::Buffers);
@@ -3017,10 +3020,10 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     }
     const auto camera_address = readable(constants[3].address, 0x70);
     const auto actor_address = readable(constants[4].address, 0x50);
-    const auto bones_address = readable(constants[6].address, bone_bytes);
+    const auto bones_address = readable(palette.address, bone_bytes);
     if (!camera_address || !actor_address || !bones_address ||
         *camera_address != constants[3].device || *actor_address != constants[4].device ||
-        *bones_address != constants[6].device) {
+        *bones_address != palette.device) {
         reject(Rejection::Buffers);
         return;
     }
@@ -3038,6 +3041,34 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         reject(Rejection::Layout);
         return;
     }
+    // Contract trace: on every 120th frame, say once per shader why a skinned draw keeps camera
+    // motion.
+    static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
+    const auto note = [&](const char* why) {
+        if (!trace || render_trace_frame % 120 != 0) {
+            return;
+        }
+        static u64 noted_frame{};
+        static std::vector<std::pair<u64, const char*>> noted;
+        if (noted_frame != render_trace_frame) {
+            noted.clear();
+            noted_frame = render_trace_frame;
+        }
+        const std::pair entry{shader_hash, why};
+        if (std::ranges::find(noted, entry) != noted.end()) {
+            return;
+        }
+        noted.push_back(entry);
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina actor rejected frame={} why={} shader={:016x} tag={} influences={} "
+                 "bones={} stride={} indices={} attributes(0,4,5,6,7)=({:08x},{:08x},{:08x},"
+                 "{:08x},{:08x})",
+                 render_trace_frame, why, shader_hash, actor[7], influences, bone_count,
+                 regs.vertex_streams[0].stride.Value(), draw.index_buffer.count,
+                 regs.vertex_attrib_format[0].hex, regs.vertex_attrib_format[4].hex,
+                 regs.vertex_attrib_format[5].hex, regs.vertex_attrib_format[6].hex,
+                 regs.vertex_attrib_format[7].hex);
+    };
     const auto& stream = regs.vertex_streams[0];
     VideoCommon::OcarinaSkinningLayout layout{
         .stride = stream.stride.Value(),
@@ -3088,13 +3119,24 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         return true;
     };
     const auto& position = regs.vertex_attrib_format[0];
+    // Positions are three floats, or half floats (the shield, most enemies) whose fourth
+    // component is not part of the position.
+    const VkFormat position_format =
+        position.IsValid() ? MaxwellToVK::VertexFormat(device, position.type, position.size)
+                           : VK_FORMAT_UNDEFINED;
+    const bool half_position = position_format == VK_FORMAT_R16G16B16A16_SFLOAT ||
+                               position_format == VK_FORMAT_R16G16B16_SFLOAT;
+    const u32 position_bytes = position_format == VK_FORMAT_R32G32B32_SFLOAT      ? 12
+                               : position_format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8
+                               : position_format == VK_FORMAT_R16G16B16_SFLOAT    ? 6
+                                                                                  : 0;
     bool supported = stream.IsEnabled() && layout.stride != 0 &&
                      !regs.vertex_stream_instances.IsInstancingEnabled(0) &&
-                     position.buffer == 0 && !position.constant && position.IsValid() &&
-                     MaxwellToVK::VertexFormat(device, position.type, position.size) ==
-                         VK_FORMAT_R32G32B32_SFLOAT &&
-                     position.offset <= layout.stride && 12 <= layout.stride - position.offset;
-    layout.position = {position.offset.Value(), 3, Component::Float32};
+                     position.buffer == 0 && !position.constant && position_bytes != 0 &&
+                     position.offset <= layout.stride &&
+                     position_bytes <= layout.stride - position.offset;
+    layout.position = {position.offset.Value(), 3,
+                       half_position ? Component::Float16 : Component::Float32};
     for (u32 group = 0; supported && group < (influences + 3) / 4; ++group) {
         const u32 used = std::min(4U, influences - group * 4);
         supported = attribute(6 + group, used, layout.joints[group], true) &&
@@ -3102,16 +3144,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     }
     if (!supported) {
         reject(Rejection::Layout);
-        static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
-        static u32 layout_reports{};
-        if (trace && layout_reports++ < 8) {
-            LOG_INFO(Render_Vulkan,
-                     "Ocarina actor unsupported layout shader={:016x} influences={} stride={} "
-                     "attributes(0,4,5,6,7)=({:08x},{:08x},{:08x},{:08x},{:08x})",
-                     shader_hash, influences, layout.stride, position.hex,
-                     regs.vertex_attrib_format[4].hex, regs.vertex_attrib_format[5].hex,
-                     regs.vertex_attrib_format[6].hex, regs.vertex_attrib_format[7].hex);
-        }
+        note("layout");
         return;
     }
     const std::array<f32, 4> origin{
@@ -3120,6 +3153,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     };
     if (!std::ranges::all_of(origin, [](f32 value) { return std::isfinite(value); })) {
         reject(Rejection::Pose);
+        note("origin");
         return;
     }
     const auto* bone_data = device_memory.GetSpan(*bones_address, bone_bytes);
@@ -3133,6 +3167,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     if (!std::ranges::all_of(oot_actor_history.Poses()[pose].bones,
                              [](f32 value) { return std::isfinite(value); })) {
         reject(Rejection::Pose);
+        note("bones");
         return;
     }
     const u32 index_bytes = static_cast<u32>(draw.index_buffer.FormatSizeInBytes());
@@ -3141,6 +3176,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     if ((index_bytes != 2 && index_bytes != 4) ||
         index_offset > std::numeric_limits<GPUVAddr>::max() - index_base) {
         reject(Rejection::Indices);
+        note("index-format");
         return;
     }
     const GPUVAddr index_address = index_base + index_offset;
@@ -3162,12 +3198,14 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     }
     if (observation.result == History::Result::Ambiguous) {
         reject(Rejection::Ambiguous);
+        note("ambiguous");
         return;
     }
     oot_actor_parts.emplace_back();
-    const auto reject_geometry = [&](Rejection reason) {
+    const auto reject_geometry = [&](Rejection reason, const char* why) {
         oot_actor_history.Reject(observation.index);
         reject(reason);
+        note(why);
     };
     const size_t indices_size = size_t{key.index_count} * index_bytes;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
@@ -3180,7 +3218,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
                : index_address <= index_limit &&
                      indices_size - 1 <= index_limit - index_address;
     if (!indices_in_bounds || !index_device) {
-        reject_geometry(Rejection::Indices);
+        reject_geometry(Rejection::Indices, indices_in_bounds ? "index-unreadable" : "index-bounds");
         return;
     }
     oot_actor_raw_indices.resize(indices_size);
@@ -3201,7 +3239,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     for (size_t index = 0; index < key.index_count; ++index) {
         const u32 value = read_index(index);
         if (regs.primitive_restart.enabled && value == regs.primitive_restart.index) {
-            reject_geometry(Rejection::Indices);
+            reject_geometry(Rejection::Indices, "primitive-restart");
             return;
         }
         minimum = std::min(minimum, value);
@@ -3214,7 +3252,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
             (std::numeric_limits<GPUVAddr>::max() - key.vertices) / layout.stride ||
         vertex_count > std::numeric_limits<size_t>::max() / layout.stride ||
         vertex_count > std::numeric_limits<u32>::max() - oot_actor_vertices.size()) {
-        reject_geometry(Rejection::Vertices);
+        reject_geometry(Rejection::Vertices, "vertex-range");
         return;
     }
     const GPUVAddr vertex_address = key.vertices + static_cast<u64>(first_vertex) * layout.stride;
@@ -3229,7 +3267,8 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
                      vertices_size - 1 <= vertex_limit - vertex_address;
     const auto vertex_device = readable(vertex_address, vertices_size);
     if (!vertices_in_bounds || !vertex_device) {
-        reject_geometry(Rejection::Vertices);
+        reject_geometry(Rejection::Vertices,
+                        vertices_in_bounds ? "vertex-unreadable" : "vertex-bounds");
         return;
     }
     oot_actor_raw_vertices.resize(vertices_size);
@@ -3237,7 +3276,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
     const size_t first_output_vertex = oot_actor_vertices.size();
     if (!VideoCommon::AppendOcarinaActorVertices(oot_actor_raw_vertices, layout, 0,
                                                 oot_actor_vertices)) {
-        reject_geometry(Rejection::Vertices);
+        reject_geometry(Rejection::Vertices, "vertex-decode");
         return;
     }
     auto& part = oot_actor_parts[observation.index];
@@ -3248,6 +3287,9 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         .index_count = key.index_count,
         .extent = oot_motion.extent,
         .view_projection = view_projection,
+        .shader_hash = shader_hash,
+        .influences = influences,
+        .bone_count = bone_count,
     };
     for (size_t index = 0; index < key.index_count; ++index) {
         oot_actor_indices.push_back(read_index(index) - minimum);
@@ -3292,6 +3334,42 @@ void RasterizerVulkan::ReadOcarinaActors() {
         for (const u32 value : std::span{oot_actor_indices}.subspan(part.first_index,
                                                                   part.index_count)) {
             oot_actor_motion.indices.push_back(vertex_offset + value);
+        }
+        if (std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr) {
+            // Where the mesh sits (every 8th vertex, skinned with this frame's pose), to tell
+            // which part of an actor a probe line is about.
+            VideoCommon::OcarinaActorMeshInfo info{
+                .first_index = static_cast<u32>(oot_actor_motion.indices.size() - part.index_count),
+                .index_count = static_cast<u32>(part.index_count),
+                .vertex_count = static_cast<u32>(part.vertex_count),
+                .shader_hash = part.shader_hash,
+                .influences = part.influences,
+                .bone_count = part.bone_count,
+                .instance_tag = entry.key.instance_tag,
+            };
+            const auto& bones = oot_actor_history.Poses()[entry.pose].bones;
+            std::array<f32, 3> low{1e30f, 1e30f, 1e30f};
+            std::array<f32, 3> high{-1e30f, -1e30f, -1e30f};
+            for (size_t v = 0; v < vertices.size(); v += 8) {
+                const auto& vertex = vertices[v];
+                std::array<f32, 3> world{};
+                for (size_t i = 0; i < 8; ++i) {
+                    const f32* m = bones.data() + size_t{vertex.joints[i]} * 12;
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        world[axis] += vertex.weights[i] *
+                                       (m[axis * 4] * vertex.position[0] +
+                                        m[axis * 4 + 1] * vertex.position[1] +
+                                        m[axis * 4 + 2] * vertex.position[2] + m[axis * 4 + 3]);
+                    }
+                }
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    low[axis] = std::min(low[axis], world[axis]);
+                    high[axis] = std::max(high[axis], world[axis]);
+                }
+            }
+            info.low = low;
+            info.high = high;
+            oot_actor_motion.meshes.push_back(info);
         }
         ++oot_actor_motion.mesh_count;
     }

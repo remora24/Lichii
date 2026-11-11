@@ -62,8 +62,12 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   meets the game's skinning contract is replayed with this and the previous frame's bones where
   its depth matches: indexed triangles, one instance, no blend or alpha test, depth-tested into
   the scene, camera constant buffer 3, actor constant buffer 4 (influence count 1-8 and the actor
-  origin), a bone-matrix palette in constant buffer 6, and position, bone-index and weight attributes in
-  the first vertex stream. The material's shader variant is not part of the contract, so all of a
+  origin), a bone-matrix palette in constant buffer 6 (or 7, for shader variants that keep a
+  material block in 6, such as Link's hair), and position, bone-index and weight attributes in
+  the first vertex stream. Positions are three 32-bit floats or half floats (Link's shield, most
+  enemies). A replayed fragment is kept when its depth is within 512 ULP of the scene depth: the
+  replay's visible surface measured up to 256 ULP in front of the scene's, and hidden surfaces
+  start beyond 4096. The material's shader variant is not part of the contract, so all of a
   character's colour variants and every 1-8 influence layout are collected. Same-frame repeats of
   one geometry and one pose are deduplicated; a geometry whose pose changes inside a frame, or
   with no pose in the frame before, keeps camera motion. Actor capture takes guest GPU addresses
@@ -144,9 +148,13 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   With that trace enabled, every 120th frame also reports the frame's collected meshes, poses and
   geometry totals, the deduplicated draws and the rejection reasons (draw shape, targets, camera,
   constant buffers, unsupported skinning layout, pose, indices, vertices, in-frame ambiguity,
-  missing history). At most eight unsupported vertex layouts are logged with their shader hash,
-  influence count, stride and attribute formats. These diagnostics do not read images back or
-  reset temporal history.
+  missing history). On those frames each rejected skinned draw is logged once per shader as
+  `Ocarina actor rejected` with the reason, shader hash, actor tag, influence count, palette
+  size, stride and attribute formats. The replay also runs a probe: `Ocarina actor probe` lines
+  give, per replayed mesh, its skinned bounds and how many of its visible (nearest) fragments
+  match the scene depth, are nearer or are farther, in bands of 256, 4096 and 65536 ULP. A
+  submitted mesh is not proof of motion: only fragments that pass the depth check are written.
+  These diagnostics do not read images back or reset temporal history.
 
 Shader hashes, buffer offsets and the skinning contract are taken from the game's current build.
 A game update that changes them disables the replacement and leaves the game's pass in place.

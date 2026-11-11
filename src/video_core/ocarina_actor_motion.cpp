@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 
@@ -17,6 +18,7 @@ u32 ComponentBytes(OcarinaSkinningComponent component) {
         return 1;
     case OcarinaSkinningComponent::UInt16:
     case OcarinaSkinningComponent::UNorm16:
+    case OcarinaSkinningComponent::Float16:
         return 2;
     case OcarinaSkinningComponent::UInt32:
     case OcarinaSkinningComponent::Float32:
@@ -48,6 +50,28 @@ T Load(const u8* data) {
     T result;
     std::memcpy(&result, data, sizeof(result));
     return result;
+}
+
+f32 HalfToFloat(u16 half) {
+    const u32 sign = u32{half & 0x8000U} << 16;
+    u32 exponent = (half >> 10) & 0x1fU;
+    u32 mantissa = half & 0x3ffU;
+    if (exponent == 0x1f) {
+        return std::bit_cast<f32>(sign | 0x7f800000U | (mantissa << 13));
+    }
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            return std::bit_cast<f32>(sign);
+        }
+        // Subnormal: shift the leading one out of the mantissa.
+        exponent = 1;
+        while ((mantissa & 0x400U) == 0) {
+            mantissa <<= 1;
+            --exponent;
+        }
+        mantissa &= 0x3ffU;
+    }
+    return std::bit_cast<f32>(sign | ((exponent + 112) << 23) | (mantissa << 13));
 }
 
 u32 ReadJoint(const u8* data, OcarinaSkinningComponent component) {
@@ -83,7 +107,8 @@ bool AppendOcarinaActorVertices(std::span<const u8> source, const OcarinaSkinnin
     if (layout.stride == 0 || source.size() % layout.stride != 0 || layout.influences == 0 ||
         layout.influences > 8 || layout.bone_count == 0 ||
         layout.bone_count > OcarinaActorBoneCount ||
-        layout.position.component != OcarinaSkinningComponent::Float32 ||
+        (layout.position.component != OcarinaSkinningComponent::Float32 &&
+         layout.position.component != OcarinaSkinningComponent::Float16) ||
         !Fits(layout.position, 3, layout.stride)) {
         return false;
     }
@@ -109,7 +134,15 @@ bool AppendOcarinaActorVertices(std::span<const u8> source, const OcarinaSkinnin
     for (size_t index = 0; index < count; ++index) {
         const u8* data = source.data() + index * layout.stride;
         OcarinaActorVertex vertex{};
-        std::memcpy(vertex.position.data(), data + layout.position.offset, sizeof(vertex.position));
+        if (layout.position.component == OcarinaSkinningComponent::Float16) {
+            for (size_t axis = 0; axis < 3; ++axis) {
+                vertex.position[axis] =
+                    HalfToFloat(Load<u16>(data + layout.position.offset + axis * 2));
+            }
+        } else {
+            std::memcpy(vertex.position.data(), data + layout.position.offset,
+                        sizeof(vertex.position));
+        }
         if (!std::ranges::all_of(vertex.position, [](f32 value) { return std::isfinite(value); })) {
             return fail();
         }

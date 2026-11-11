@@ -232,3 +232,35 @@ TEST_CASE("Ocarina skinning bounds active joints by the actor's captured palette
     REQUIRE(vertices.size() == 1);
     CHECK(Skin(vertices[0]) == original);
 }
+
+TEST_CASE("Ocarina skinning decodes half-float positions and ignores their fourth component",
+          "[video_core][ocarina][actor_motion]") {
+    // The shield's layout: RGBA16F position, two 8-bit joints and weights, 24-byte stride.
+    OcarinaSkinningLayout layout{
+        .stride = 24,
+        .influences = 2,
+        .bone_count = 5,
+        .position = {0, 3, OcarinaSkinningComponent::Float16},
+        .joints = {{{20, 2, OcarinaSkinningComponent::UInt8}, {}}},
+        .weights = {{{22, 2, OcarinaSkinningComponent::UNorm8}, {}}},
+    };
+    std::vector<u8> bytes(layout.stride);
+    Store(bytes, 0, u16{0x3e00}); // 1.5
+    Store(bytes, 2, u16{0xc100}); // -2.5
+    Store(bytes, 4, u16{0x0001}); // smallest subnormal, 2^-24
+    Store(bytes, 6, u16{0x7c00}); // infinity in the unused fourth component
+    bytes[20] = 4;
+    bytes[22] = 255;
+    std::vector<OcarinaActorVertex> vertices;
+    REQUIRE(AppendOcarinaActorVertices(bytes, layout, 0, vertices));
+    CHECK(vertices[0].position == std::array<f32, 3>{1.5f, -2.5f, 0x1p-24f});
+    CHECK(vertices[0].joints[0] == 4);
+
+    Store(bytes, 2, u16{0x7e00}); // NaN position
+    CHECK_FALSE(AppendOcarinaActorVertices(bytes, layout, 0, vertices));
+    Store(bytes, 2, u16{0xfc00}); // -infinity position
+    CHECK_FALSE(AppendOcarinaActorVertices(bytes, layout, 0, vertices));
+    layout.position.offset = 19; // six bytes no longer fit
+    CHECK_FALSE(AppendOcarinaActorVertices(bytes, layout, 0, vertices));
+    REQUIRE(vertices.size() == 1);
+}

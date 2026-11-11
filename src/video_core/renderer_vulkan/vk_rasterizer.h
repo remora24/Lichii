@@ -335,6 +335,9 @@ private:
         size_t index_count{};
         VkExtent2D extent{};
         std::array<f32, 16> view_projection{};
+        u64 shader_hash{};
+        u32 influences{};
+        u32 bone_count{};
     };
     std::vector<OcarinaActorPart> oot_actor_parts;
     std::vector<VideoCommon::OcarinaActorVertex> oot_actor_vertices;

@@ -32,11 +32,25 @@ struct alignas(16) OcarinaActorPose {
 };
 static_assert(sizeof(OcarinaActorPose) == 13456);
 
+/// Contract trace only: what one replayed mesh is, for the overlay's depth-match probe.
+struct OcarinaActorMeshInfo {
+    u32 first_index{};
+    u32 index_count{};
+    u32 vertex_count{};
+    u64 shader_hash{};
+    u32 influences{};
+    u32 bone_count{};
+    u32 instance_tag{};
+    std::array<f32, 3> low{};  ///< skinned bounds, relative to the actor origin
+    std::array<f32, 3> high{};
+};
+
 struct OcarinaActorMotion {
     std::vector<OcarinaActorVertex> vertices;
     std::vector<u32> indices;
     std::vector<OcarinaActorPose> current_poses;
     std::vector<OcarinaActorPose> previous_poses;
+    std::vector<OcarinaActorMeshInfo> meshes; ///< empty unless the contract trace is on
     u32 mesh_count{};
 
     void Clear() {
@@ -44,6 +58,7 @@ struct OcarinaActorMotion {
         indices.clear();
         current_poses.clear();
         previous_poses.clear();
+        meshes.clear();
         mesh_count = 0;
     }
 };
@@ -55,6 +70,7 @@ enum class OcarinaSkinningComponent : u8 {
     UNorm8,
     UNorm16,
     Float32,
+    Float16, ///< positions only
 };
 
 struct OcarinaSkinningAttribute {
