@@ -27,10 +27,11 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 - Support smaller actor bone palettes in Ocarina instead of requiring Link's 13568-byte c6
   binding. Capture only available matrices, reject active joints outside the captured palette,
   and zero-pad the fixed replay pose without reading past the binding.
-- Fix ghosting on Link's hat, shield and hair, and on most enemies, with Ocarina's temporal
-  upscaling (FSR 3.1 and FSR 4). The replay dropped most visible actor pixels at a 16-ULP depth
-  check (now 512), rejected half-float vertex positions (the shield), and read the bone palette
-  from constant buffer 6 where some shader variants keep it in 7 (the hair). The contract trace
+- Fix ghosting on Link's hat and shield, and on most enemies, with Ocarina's temporal upscaling
+  (FSR 3.1 and FSR 4). The replay dropped most visible actor pixels at a 16-ULP depth check
+  (now 512), rejected half-float vertex positions (the shield), and read the bone palette from
+  constant buffer 6 where some shader variants keep it in 7 (Link's hair, which is now replayed
+  but still matches the scene depth on only about a quarter of its pixels). The contract trace
   now logs each rejected draw and measures per mesh how many visible fragments are written.
 
 ## [0.1.0]
