@@ -3034,7 +3034,7 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
 
 void RasterizerVulkan::BeginOcarinaActorFrame() {
     oot_actor_history.BeginFrame(render_trace_frame);
-    oot_actor_motion.Clear();
+    oot_actor_motion.ClearPoses();
     oot_actor_parts.clear();
     // Geometry no actor drew for two seconds is gone or replaced.
     std::erase_if(oot_actor_geometry, [this](const OcarinaActorGeometry& geometry) {
@@ -3525,6 +3525,7 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
         if (cached == oot_actor_geometry.end()) {
             cached = oot_actor_geometry.insert(oot_actor_geometry.end(), {.key = key});
         }
+        cached->version = ++oot_actor_geometry_versions;
         if (!indices_cached) {
             cached->restart = restart;
             cached->restart_index = restart_index;
@@ -3552,9 +3553,11 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
 
 /// Assemble one batch only after every pass has had a chance to expose an ambiguous identity.
 void RasterizerVulkan::ReadOcarinaActors() {
-    oot_actor_motion.Clear();
+    oot_actor_motion.ClearPoses();
     oot_actor_pose_pairs.clear();
+    oot_actor_batch.clear();
     const auto& entries = oot_actor_history.Entries();
+    size_t vertex_total{};
     for (size_t index = 0; index < entries.size(); ++index) {
         const auto& entry = entries[index];
         const auto& part = oot_actor_parts[index];
@@ -3565,8 +3568,7 @@ void RasterizerVulkan::ReadOcarinaActors() {
             continue;
         }
         const auto& geometry = oot_actor_geometry[part.geometry];
-        const auto& vertices = geometry.vertices;
-        if (vertices.size() > std::numeric_limits<u32>::max() - oot_actor_motion.vertices.size()) {
+        if (geometry.vertices.size() > std::numeric_limits<u32>::max() - vertex_total) {
             continue;
         }
         if (!entry.previous_pose) {
@@ -3582,6 +3584,31 @@ void RasterizerVulkan::ReadOcarinaActors() {
             oot_actor_motion.previous_poses.push_back(
                 oot_actor_history.PreviousPoses()[*entry.previous_pose]);
         }
+        vertex_total += geometry.vertices.size();
+        oot_actor_batch.push_back({geometry.version, part.geometry, pose_index, index});
+    }
+    oot_actor_motion.mesh_count = static_cast<u32>(oot_actor_batch.size());
+    // The vertices and indices follow from each mesh's decoded content and pose index, in order:
+    // while those are the same as the last batch built, keep it (most frames).
+    static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
+    const bool built = std::ranges::equal(
+        oot_actor_batch, oot_actor_batch_built, [](const auto& mesh, const auto& made) {
+            return mesh.version == made.first && mesh.pose_index == made.second;
+        });
+    if (built && !trace) {
+        return;
+    }
+    oot_actor_motion.vertices.clear();
+    oot_actor_motion.indices.clear();
+    oot_actor_batch_built.clear();
+    ++oot_actor_motion.geometry_serial;
+    for (const auto& mesh : oot_actor_batch) {
+        const auto& entry = entries[mesh.entry];
+        const auto& part = oot_actor_parts[mesh.entry];
+        const auto& geometry = oot_actor_geometry[mesh.geometry];
+        const auto& vertices = geometry.vertices;
+        const u32 pose_index = mesh.pose_index;
+        oot_actor_batch_built.emplace_back(mesh.version, pose_index);
         const u32 vertex_offset = static_cast<u32>(oot_actor_motion.vertices.size());
         oot_actor_motion.vertices.insert(oot_actor_motion.vertices.end(), vertices.begin(),
                                           vertices.end());
@@ -3591,7 +3618,7 @@ void RasterizerVulkan::ReadOcarinaActors() {
         for (const u32 value : geometry.indices) {
             oot_actor_motion.indices.push_back(vertex_offset + value);
         }
-        if (std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr) {
+        if (trace) {
             // Where the mesh sits (every 8th vertex, skinned with this frame's pose), to tell
             // which part of an actor a probe line is about.
             VideoCommon::OcarinaActorMeshInfo info{
@@ -3628,7 +3655,6 @@ void RasterizerVulkan::ReadOcarinaActors() {
             info.high = high;
             oot_actor_motion.meshes.push_back(info);
         }
-        ++oot_actor_motion.mesh_count;
     }
 }
 

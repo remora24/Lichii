@@ -48,14 +48,16 @@ struct OcarinaActorMeshInfo {
 struct OcarinaActorMotion {
     std::vector<OcarinaActorVertex> vertices;
     std::vector<u32> indices;
+    /// Changes whenever vertices or indices do, so an uploaded copy can be kept while it doesn't.
+    u64 geometry_serial{};
     std::vector<OcarinaActorPose> current_poses;
     std::vector<OcarinaActorPose> previous_poses;
     std::vector<OcarinaActorMeshInfo> meshes; ///< empty unless the contract trace is on
     u32 mesh_count{};
 
-    void Clear() {
-        vertices.clear();
-        indices.clear();
+    /// Drops the frame's poses. The geometry stays for the next frame's batch to reuse; without
+    /// poses nothing replays it.
+    void ClearPoses() {
         current_poses.clear();
         previous_poses.clear();
         meshes.clear();

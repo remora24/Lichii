@@ -366,6 +366,7 @@ private:
         std::vector<VideoCommon::OcarinaActorVertex> vertices;
         std::vector<u32> indices; ///< relative to the first vertex
         u64 last_frame{};
+        u64 version{}; ///< Unique to this decoded content (oot_actor_geometry_versions)
     };
     std::vector<OcarinaActorGeometry> oot_actor_geometry;
     std::vector<u8> oot_actor_raw_vertices; ///< staging when guest bytes span mappings
@@ -373,6 +374,18 @@ private:
     /// Fallback staging for the bone constants when they span more than one mapping.
     std::array<u8, VideoCommon::OcarinaActorBoneCount * 12 * sizeof(f32)> oot_actor_raw_pose{};
     std::vector<std::pair<u32, u32>> oot_actor_pose_pairs;
+    u64 oot_actor_geometry_versions{};
+    /// One replayed mesh of the frame's batch: its geometry's version and index, and its pose.
+    struct OcarinaActorBatchMesh {
+        u64 version{};
+        size_t geometry{};
+        u32 pose_index{};
+        size_t entry{};
+    };
+    /// The batch being assembled, and what oot_actor_motion's vertices and indices were built
+    /// from (version and pose index per mesh): an equal batch keeps them.
+    std::vector<OcarinaActorBatchMesh> oot_actor_batch;
+    std::vector<std::pair<u64, u32>> oot_actor_batch_built;
     enum class OcarinaActorRejection : size_t {
         Draw, Targets, Camera, Buffers, Layout, Pose, Indices, Vertices, Ambiguous, History, Count
     };

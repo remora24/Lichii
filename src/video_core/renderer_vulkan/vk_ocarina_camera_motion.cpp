@@ -165,6 +165,7 @@ public:
         std::memset(probe.Mapped().data(), 0, PROBE_BYTES);
         probe.Flush();
         meshes = motion.meshes;
+        geometry_serial = motion.geometry_serial;
         // The probe image is only read and written under the contract trace.
         nearest = CreateOcarinaImage(allocator, meshes.empty() ? VkExtent2D{1, 1} : extent,
                                      VK_FORMAT_R32_UINT,
@@ -280,10 +281,14 @@ public:
                 buffer.Flush();
             }
         };
-        upload(vertices, vertex_capacity, std::as_bytes(std::span{motion.vertices}),
-               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        upload(indices, index_capacity, std::as_bytes(std::span{motion.indices}),
-               VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        // The batch's vertices and indices only change with its meshes: keep this slot's copy.
+        if (geometry_serial != motion.geometry_serial) {
+            upload(vertices, vertex_capacity, std::as_bytes(std::span{motion.vertices}),
+                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            upload(indices, index_capacity, std::as_bytes(std::span{motion.indices}),
+                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            geometry_serial = motion.geometry_serial;
+        }
         // Both pose tables always have the same capacity and matching pose indices.
         size_t previous_capacity = pose_capacity;
         upload(current, pose_capacity, std::as_bytes(std::span{motion.current_poses}),
@@ -498,6 +503,7 @@ private:
     vk::Image nearest; ///< contract trace: the replay's nearest depth per pixel
     vk::ImageView nearest_view;
     std::vector<VideoCommon::OcarinaActorMeshInfo> meshes; ///< of the last upload; contract trace
+    u64 geometry_serial{}; ///< OcarinaActorMotion::geometry_serial of the uploaded geometry
     vk::DescriptorSetLayout set_layout;
     vk::DescriptorPool descriptor_pool;
     vk::DescriptorSets sets;
