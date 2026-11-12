@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <cstring>
 #include <tuple>
 #include <set>
 #include <span>
@@ -765,7 +766,8 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
 }
 
 template <typename Func>
-void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
+void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect,
+                                   u32 instance_count) {
 
     if (Common::DkbFrameTrace::Enabled()) {
         ++trace_draws;
@@ -1064,7 +1066,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 
     TrackOcarinaCamera();
-    TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
+    {
+        Profile::Scope scope{Profile::Zone::OcarinaActors};
+        TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect, instance_count);
+    }
     TracePendingCpuWrites(false, pipeline->ShaderHashes());
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
     if (frame_dump.Capturing()) {
@@ -1521,7 +1526,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
                 is_indexed ? "vkCmdDrawIndexed" : "vkCmdDraw", params, VK_SUCCESS);
         }
-    });
+    }, false, instance_count);
 }
 
 void RasterizerVulkan::DrawIndirect() {
@@ -2920,102 +2925,501 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
     }
 }
 
-/// Capture the skinning pose of the recognized Link draw for frame-to-frame motion.
-void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect) {
-    if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect ||
-        !OcarinaTemporalEnabled() || oot_actor.frame == render_trace_frame) {
-        return;
-    }
-    const auto& draw = maxwell3d->draw_manager.draw_state;
-    const auto& regs = maxwell3d->regs;
-    const auto& stream = regs.vertex_streams[0];
-    if (draw.index_buffer.count != 9702 || draw.index_buffer.FormatSizeInBytes() != 2 ||
-        !stream.IsEnabled() || stream.stride != 48 || regs.vertex_stream_instances.IsInstancingEnabled(0)) {
-        return;
-    }
-    const auto attribute = [&](u32 location, VkFormat format, u32 offset) {
-        const auto& attrib = regs.vertex_attrib_format[location];
-        return attrib.buffer == 0 && !attrib.constant && attrib.offset == offset &&
-            MaxwellToVK::VertexFormat(device, attrib.type, attrib.size) == format;
-    };
-    if (!attribute(0, VK_FORMAT_R32G32B32_SFLOAT, 0) ||
-        !attribute(4, VK_FORMAT_R8G8B8A8_UNORM, 40) || !attribute(5, VK_FORMAT_R8G8B8A8_UNORM, 44) ||
-        !attribute(6, VK_FORMAT_R16G16B16A16_UINT, 12) || !attribute(7, VK_FORMAT_R16G16B16A16_UINT, 20)) {
-        return;
-    }
-
-    OcarinaActorPose pose{
-        .frame = render_trace_frame,
-        .channel = gpu_memory,
-        .vertex = stream.Address(),
-        .indices = draw.index_buffer.IndexStart(),
-        .base_vertex = static_cast<s32>(draw.base_index),
-    };
-    bool origin_found{}, bones_found{};
-    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
-                                                const auto& binding, u32 size, const auto*, u32) {
-        if (stage != 0 || storage || (index != 4 && index != 6) ||
-            buffer_cache.IsRegionGpuModified(binding.device_addr, size)) {
-            return;
-        }
-        if (index == 4 && size >= 0x40 + 3 * sizeof(f32)) {
-            device_memory.ReadBlockUnsafe(binding.device_addr + 0x40, pose.origin.data(), 3 * sizeof(f32));
-            origin_found = true;
-        }
-        if (index == 6 && size == 13568) {
-            device_memory.ReadBlockUnsafe(binding.device_addr, pose.bones.data(), sizeof(pose.bones));
-            bones_found = true;
-        }
+void RasterizerVulkan::BeginOcarinaActorFrame() {
+    oot_actor_history.BeginFrame(render_trace_frame);
+    oot_actor_motion.Clear();
+    oot_actor_parts.clear();
+    // Geometry no actor drew for two seconds is gone or replaced.
+    std::erase_if(oot_actor_geometry, [this](const OcarinaActorGeometry& geometry) {
+        return geometry.last_frame + 120 < render_trace_frame;
     });
-    if (origin_found && bones_found) {
-        oot_previous_actor = oot_actor;
-        oot_actor = pose;
-    }
+    oot_actor_pose_pairs.clear();
+    oot_actor_rejections.fill(0);
+    oot_actor_duplicates = 0;
 }
 
-/// Read the shared mesh only when both poses refer to the same vertex and index buffers.
-void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
-    const auto& now = oot_actor;
-    const auto& before = oot_previous_actor;
-    if (now.frame != render_trace_frame || before.frame + 1 != now.frame ||
-        now.channel != gpu_memory || before.channel != now.channel || now.vertex != before.vertex ||
-        now.indices != before.indices || now.base_vertex != before.base_vertex) {
+/// Collect the opaque skinning contract, independently of the material's shader variant.
+void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect,
+                                        u32 instance_count) {
+    if (!OcarinaTemporalEnabled()) {
         return;
     }
-    const auto read = [&](GPUVAddr address, void* dst, size_t size) {
-        if (!gpu_memory->IsContinuousRange(address, size) ||
+    using Rejection = OcarinaActorRejection;
+    using Component = VideoCommon::OcarinaSkinningComponent;
+    using History = VideoCommon::OcarinaActorHistory;
+    const auto reject = [&](Rejection reason) {
+        ++oot_actor_rejections[static_cast<size_t>(reason)];
+    };
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const auto& regs = maxwell3d->regs;
+    if (!is_indexed || is_indirect || mesh_draw || instance_count != 1 ||
+        draw.draw_mode == Tegra::Engines::Maxwell3D::DrawManager::DrawMode::InlineIndex ||
+        draw.topology != Maxwell::Regs::PrimitiveTopology::Triangles ||
+        draw.index_buffer.count == 0 || draw.index_buffer.count % 3 != 0 ||
+        regs.IsShaderConfigEnabled(2) || regs.IsShaderConfigEnabled(3) ||
+        regs.IsShaderConfigEnabled(4)) {
+        reject(Rejection::Draw);
+        return;
+    }
+    const auto& targets = texture_cache.GetRenderTargets();
+    if (!targets.color_buffer_ids[0] || !targets.depth_buffer_id || !regs.depth_test_enable ||
+        !regs.rasterize_enable || regs.blend.enable[0] || regs.alpha_test_enabled) {
+        reject(Rejection::Targets);
+        return;
+    }
+    const auto& color = texture_cache.GetImageView(targets.color_buffer_ids[0]);
+    const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
+    if (oot_camera_sample_frame != render_trace_frame || oot_motion.camera_channel != gpu_memory ||
+        color.format != VideoCore::Surface::PixelFormat::B10G11R11_FLOAT ||
+        depth.format != VideoCore::Surface::PixelFormat::D32_FLOAT ||
+        color.size.width != oot_motion.extent.width || color.size.height != oot_motion.extent.height ||
+        depth.size.width != color.size.width || depth.size.height != color.size.height ||
+        color.IsRescaled() || depth.IsRescaled() ||
+        color.Samples() != VK_SAMPLE_COUNT_1_BIT || depth.Samples() != VK_SAMPLE_COUNT_1_BIT ||
+        color.range != VideoCommon::SubresourceRange{} ||
+        depth.range != VideoCommon::SubresourceRange{}) {
+        reject(Rejection::Targets);
+        return;
+    }
+    struct BoundConstant {
+        GPUVAddr address{};
+        DAddr device{};
+        u32 size{};
+    };
+    std::array<BoundConstant, 8> constants{};
+    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
+                                                const auto& binding, u32 size, const auto*, u32) {
+        if (stage == 0 && !storage && (index == 3 || index == 4 || index == 6 || index == 7)) {
+            // Uniform-cache bindings retain only the device address, not the guest GPU address.
+            const auto& constant = maxwell3d->state.shader_stages[stage].const_buffers[index];
+            if (constant.enabled) {
+                constants[index] = {constant.address, binding.device_addr,
+                                    std::min(constant.size, size)};
+            }
+        }
+    });
+    const auto readable = [&](GPUVAddr address, size_t size) -> std::optional<DAddr> {
+        if (size == 0 || size - 1 > std::numeric_limits<GPUVAddr>::max() - address ||
+            !gpu_memory->IsContinuousRange(address, size) ||
             !gpu_memory->IsFullyMappedRange(address, size)) {
-            return false;
+            return std::nullopt;
         }
         const auto device_address = gpu_memory->GpuToCpuAddress(address);
         if (!device_address || buffer_cache.IsRegionGpuModified(*device_address, size) ||
             gpu.HasPendingCPUWrites(*device_address, size)) {
+            return std::nullopt;
+        }
+        return device_address;
+    };
+    // Shader variants with a material block in constant buffer 6 (Link's hair, some enemies)
+    // keep the bone palette in 7. Only buffers the bound vertex shader reads are visited above.
+    const BoundConstant& palette = constants[7].size != 0 ? constants[7] : constants[6];
+    constexpr size_t bone_stride = 12 * sizeof(f32);
+    constexpr size_t max_bone_bytes = VideoCommon::OcarinaActorBoneCount * bone_stride;
+    const u32 bone_count = std::min(VideoCommon::OcarinaActorBoneCount,
+                                    static_cast<u32>(palette.size / bone_stride));
+    const size_t bone_bytes = size_t{bone_count} * bone_stride;
+    if (constants[3].size < 0x70 || constants[4].size < 0x50 || bone_count == 0) {
+        reject(Rejection::Buffers);
+        return;
+    }
+    const auto camera_address = readable(constants[3].address, 0x70);
+    const auto actor_address = readable(constants[4].address, 0x50);
+    const auto bones_address = readable(palette.address, bone_bytes);
+    if (!camera_address || !actor_address || !bones_address ||
+        *camera_address != constants[3].device || *actor_address != constants[4].device ||
+        *bones_address != palette.device) {
+        reject(Rejection::Buffers);
+        return;
+    }
+    std::array<f32, 16> view_projection;
+    device_memory.ReadBlockUnsafe(*camera_address + 0x30, view_projection.data(),
+                                  sizeof(view_projection));
+    if (view_projection != oot_motion.current) {
+        reject(Rejection::Camera);
+        return;
+    }
+    std::array<u32, 8> actor;
+    device_memory.ReadBlockUnsafe(*actor_address + 0x30, actor.data(), sizeof(actor));
+    const u32 influences = actor[0];
+    if (influences < 1 || influences > 8) {
+        reject(Rejection::Layout);
+        return;
+    }
+    // Contract trace: on every 120th frame, say once per shader why a skinned draw keeps camera
+    // motion.
+    static const bool trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
+    const auto note = [&](const char* why) {
+        if (!trace || render_trace_frame % 120 != 0) {
+            return;
+        }
+        static u64 noted_frame{};
+        static std::vector<std::pair<u64, const char*>> noted;
+        if (noted_frame != render_trace_frame) {
+            noted.clear();
+            noted_frame = render_trace_frame;
+        }
+        const std::pair entry{shader_hash, why};
+        if (std::ranges::find(noted, entry) != noted.end()) {
+            return;
+        }
+        noted.push_back(entry);
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina actor rejected frame={} why={} shader={:016x} tag={} influences={} "
+                 "bones={} stride={} indices={} attributes(0,4,5,6,7)=({:08x},{:08x},{:08x},"
+                 "{:08x},{:08x})",
+                 render_trace_frame, why, shader_hash, actor[7], influences, bone_count,
+                 regs.vertex_streams[0].stride.Value(), draw.index_buffer.count,
+                 regs.vertex_attrib_format[0].hex, regs.vertex_attrib_format[4].hex,
+                 regs.vertex_attrib_format[5].hex, regs.vertex_attrib_format[6].hex,
+                 regs.vertex_attrib_format[7].hex);
+    };
+    const auto& stream = regs.vertex_streams[0];
+    VideoCommon::OcarinaSkinningLayout layout{
+        .stride = stream.stride.Value(),
+        .influences = influences,
+        .bone_count = bone_count,
+    };
+    const auto attribute = [&](u32 location, u32 used,
+                               VideoCommon::OcarinaSkinningAttribute& output, bool joints) {
+        const auto& attrib = regs.vertex_attrib_format[location];
+        if (attrib.buffer != 0 || attrib.constant || !attrib.IsValid()) {
             return false;
         }
-        gpu_memory->ReadBlockUnsafe(address, dst, size);
+        const VkFormat format = MaxwellToVK::VertexFormat(device, attrib.type, attrib.size);
+        u32 components{};
+        u32 bytes{};
+        Component component{};
+        const auto match = [&](const std::array<VkFormat, 4>& formats, Component candidate,
+                               u32 width) {
+            const auto found = std::ranges::find(formats, format);
+            if (found == formats.end()) {
+                return false;
+            }
+            components = static_cast<u32>(found - formats.begin()) + 1;
+            bytes = width;
+            component = candidate;
+            return true;
+        };
+        const bool supported =
+            joints
+                ? match({VK_FORMAT_R8_UINT, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8B8_UINT,
+                         VK_FORMAT_R8G8B8A8_UINT}, Component::UInt8, 1) ||
+                      match({VK_FORMAT_R16_UINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16B16_UINT,
+                             VK_FORMAT_R16G16B16A16_UINT}, Component::UInt16, 2) ||
+                      match({VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT,
+                             VK_FORMAT_R32G32B32A32_UINT}, Component::UInt32, 4)
+                : match({VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM,
+                         VK_FORMAT_R8G8B8A8_UNORM}, Component::UNorm8, 1) ||
+                      match({VK_FORMAT_R16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16B16_UNORM,
+                             VK_FORMAT_R16G16B16A16_UNORM}, Component::UNorm16, 2) ||
+                      match({VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT,
+                             VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT},
+                            Component::Float32, 4);
+        if (!supported || components < used || attrib.offset > layout.stride ||
+            components * bytes > layout.stride - attrib.offset) {
+            return false;
+        }
+        output = {attrib.offset.Value(), used, component};
         return true;
     };
-    constexpr size_t index_count = 9702;
-    constexpr size_t stride = 48;
-    std::vector<u16> indices(index_count);
-    if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
+    const auto& position = regs.vertex_attrib_format[0];
+    // Positions are three floats, or half floats (the shield, most enemies) whose fourth
+    // component is not part of the position.
+    const VkFormat position_format =
+        position.IsValid() ? MaxwellToVK::VertexFormat(device, position.type, position.size)
+                           : VK_FORMAT_UNDEFINED;
+    const bool half_position = position_format == VK_FORMAT_R16G16B16A16_SFLOAT ||
+                               position_format == VK_FORMAT_R16G16B16_SFLOAT;
+    const u32 position_bytes = position_format == VK_FORMAT_R32G32B32_SFLOAT      ? 12
+                               : position_format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8
+                               : position_format == VK_FORMAT_R16G16B16_SFLOAT    ? 6
+                                                                                  : 0;
+    bool supported = stream.IsEnabled() && layout.stride != 0 &&
+                     !regs.vertex_stream_instances.IsInstancingEnabled(0) &&
+                     position.buffer == 0 && !position.constant && position_bytes != 0 &&
+                     position.offset <= layout.stride &&
+                     position_bytes <= layout.stride - position.offset;
+    layout.position = {position.offset.Value(), 3,
+                       half_position ? Component::Float16 : Component::Float32};
+    for (u32 group = 0; supported && group < (influences + 3) / 4; ++group) {
+        const u32 used = std::min(4U, influences - group * 4);
+        supported = attribute(6 + group, used, layout.joints[group], true) &&
+                    (influences == 1 || attribute(4 + group, used, layout.weights[group], false));
+    }
+    if (!supported) {
+        reject(Rejection::Layout);
+        note("layout");
         return;
     }
-    const auto [minimum, maximum] = std::ranges::minmax(indices);
-    const s64 first = static_cast<s64>(now.base_vertex) + minimum;
-    const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
-    if (first < 0 || first > (1 << 20) || vertex_count > 16384) {
+    std::optional<VideoCommon::Nx2Profile::Scope> pose_scope{
+        std::in_place, VideoCommon::Nx2Profile::Zone::OcarinaActorPose};
+    const std::array<f32, 4> origin{
+        std::bit_cast<f32>(actor[4]), std::bit_cast<f32>(actor[5]),
+        std::bit_cast<f32>(actor[6]), 0.0f,
+    };
+    if (!std::ranges::all_of(origin, [](f32 value) { return std::isfinite(value); })) {
+        reject(Rejection::Pose);
+        note("origin");
         return;
     }
-    std::vector<u8> vertices(vertex_count * stride);
-    if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
+    const auto* bone_data = device_memory.GetSpan(*bones_address, bone_bytes);
+    if (bone_bytes != max_bone_bytes || !bone_data) {
+        device_memory.ReadBlockUnsafe(*bones_address, oot_actor_raw_pose.data(), bone_bytes);
+        std::fill(oot_actor_raw_pose.begin() + bone_bytes, oot_actor_raw_pose.end(), u8{});
+        bone_data = oot_actor_raw_pose.data();
+    }
+    const u32 pose = oot_actor_history.FindOrAddPose(
+        std::span<const u8, max_bone_bytes>{bone_data, max_bone_bytes}, origin);
+    if (!std::ranges::all_of(oot_actor_history.Poses()[pose].bones,
+                             [](f32 value) { return std::isfinite(value); })) {
+        reject(Rejection::Pose);
+        note("bones");
         return;
     }
-    for (u16& index : indices) {
-        index -= minimum;
+    const u32 index_bytes = static_cast<u32>(draw.index_buffer.FormatSizeInBytes());
+    const u64 index_offset = u64{draw.index_buffer.first} * index_bytes;
+    const GPUVAddr index_base = draw.index_buffer.StartAddress();
+    if ((index_bytes != 2 && index_bytes != 4) ||
+        index_offset > std::numeric_limits<GPUVAddr>::max() - index_base) {
+        reject(Rejection::Indices);
+        note("index-format");
+        return;
     }
+    const GPUVAddr index_address = index_base + index_offset;
+    const VideoCommon::OcarinaActorGeometryKey key{
+        .channel = gpu_memory,
+        .mapping_serial = gpu_memory->HostPointerSerial(),
+        .instance_tag = actor[7],
+        .vertices = stream.Address(),
+        .indices = index_address,
+        .base_vertex = static_cast<s32>(draw.base_index),
+        .index_count = draw.index_buffer.count,
+        .index_bytes = index_bytes,
+        .layout = layout,
+    };
+    const auto observation = oot_actor_history.Observe(key, pose);
+    if (observation.result == History::Result::Duplicate) {
+        ++oot_actor_duplicates;
+        return;
+    }
+    if (observation.result == History::Result::Ambiguous) {
+        reject(Rejection::Ambiguous);
+        note("ambiguous");
+        return;
+    }
+    oot_actor_parts.emplace_back();
+    const auto reject_geometry = [&](Rejection reason, const char* why) {
+        oot_actor_history.Reject(observation.index);
+        reject(reason);
+        note(why);
+    };
+    pose_scope.reset();
+    const VideoCommon::Nx2Profile::Scope geometry_scope{
+        VideoCommon::Nx2Profile::Zone::OcarinaActorGeometry};
+    const size_t indices_size = size_t{key.index_count} * index_bytes;
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    const u64 native_index_size = native ? regs.NativeIndexBufferSize() : 0;
+    const GPUVAddr index_limit = draw.index_buffer.EndAddress();
+    const auto index_device = readable(index_address, indices_size);
+    const bool indices_in_bounds =
+        native ? index_offset <= native_index_size &&
+                     indices_size <= native_index_size - index_offset
+               : index_address <= index_limit &&
+                     indices_size - 1 <= index_limit - index_address;
+    if (!indices_in_bounds || !index_device) {
+        reject_geometry(Rejection::Indices, indices_in_bounds ? "index-unreadable" : "index-bounds");
+        return;
+    }
+    // Guest bytes in place when one mapping holds them, else copied into `staging`.
+    const auto guest_bytes = [&](DAddr address, size_t size,
+                                 std::vector<u8>& staging) -> std::span<const u8> {
+        if (const u8* span = device_memory.GetSpan(address, size)) {
+            return {span, size};
+        }
+        staging.resize(size);
+        device_memory.ReadBlockUnsafe(address, staging.data(), size);
+        return staging;
+    };
+    const auto raw_indices = guest_bytes(*index_device, indices_size, oot_actor_raw_indices);
+    const bool restart = regs.primitive_restart.enabled != 0;
+    const u32 restart_index = regs.primitive_restart.index;
+    auto cached = std::ranges::find(oot_actor_geometry, key, &OcarinaActorGeometry::key);
+    const bool indices_cached =
+        cached != oot_actor_geometry.end() && cached->restart == restart &&
+        (!restart || cached->restart_index == restart_index) &&
+        std::ranges::equal(cached->raw_indices, raw_indices);
+    const auto read_index = [&](size_t index) {
+        u32 value{};
+        if (index_bytes == 2) {
+            // Not `small`: Windows headers define it as a macro.
+            u16 index16;
+            std::memcpy(&index16, raw_indices.data() + index * 2, sizeof(index16));
+            value = index16;
+        } else {
+            std::memcpy(&value, raw_indices.data() + index * 4, sizeof(value));
+        }
+        return value;
+    };
+    u32 minimum = std::numeric_limits<u32>::max();
+    u64 vertex_count{};
+    if (indices_cached) {
+        minimum = cached->minimum;
+        vertex_count = cached->vertex_count;
+    } else {
+        u32 maximum{};
+        for (size_t index = 0; index < key.index_count; ++index) {
+            const u32 value = read_index(index);
+            if (restart && value == restart_index) {
+                reject_geometry(Rejection::Indices, "primitive-restart");
+                return;
+            }
+            minimum = std::min(minimum, value);
+            maximum = std::max(maximum, value);
+        }
+        vertex_count = u64{maximum} - minimum + 1;
+    }
+    const s64 first_vertex = s64{key.base_vertex} + minimum;
+    if (first_vertex < 0 ||
+        static_cast<u64>(first_vertex) >
+            (std::numeric_limits<GPUVAddr>::max() - key.vertices) / layout.stride ||
+        vertex_count > std::numeric_limits<size_t>::max() / layout.stride ||
+        vertex_count > std::numeric_limits<u32>::max()) {
+        reject_geometry(Rejection::Vertices, "vertex-range");
+        return;
+    }
+    const GPUVAddr vertex_address = key.vertices + static_cast<u64>(first_vertex) * layout.stride;
+    const GPUVAddr vertex_limit = regs.vertex_stream_limits[0].Address();
+    const size_t vertices_size = static_cast<size_t>(vertex_count) * layout.stride;
+    const u64 vertex_offset = vertex_address - key.vertices;
+    const u64 native_vertex_size = native ? regs.NativeVertexStreamSize(0) : 0;
+    const bool vertices_in_bounds =
+        native ? vertex_offset <= native_vertex_size &&
+                     vertices_size <= native_vertex_size - vertex_offset
+               : vertex_address <= vertex_limit &&
+                     vertices_size - 1 <= vertex_limit - vertex_address;
+    const auto vertex_device = readable(vertex_address, vertices_size);
+    if (!vertices_in_bounds || !vertex_device) {
+        reject_geometry(Rejection::Vertices,
+                        vertices_in_bounds ? "vertex-unreadable" : "vertex-bounds");
+        return;
+    }
+    const auto raw_vertices = guest_bytes(*vertex_device, vertices_size, oot_actor_raw_vertices);
+    if (!indices_cached || !std::ranges::equal(cached->raw_vertices, raw_vertices)) {
+        // Decode before touching the cache, so a rejected draw leaves the last good entry.
+        std::vector<VideoCommon::OcarinaActorVertex> vertices;
+        if (!VideoCommon::AppendOcarinaActorVertices(raw_vertices, layout, 0, vertices)) {
+            reject_geometry(Rejection::Vertices, "vertex-decode");
+            return;
+        }
+        if (cached == oot_actor_geometry.end()) {
+            cached = oot_actor_geometry.insert(oot_actor_geometry.end(), {.key = key});
+        }
+        if (!indices_cached) {
+            cached->restart = restart;
+            cached->restart_index = restart_index;
+            cached->raw_indices.assign(raw_indices.begin(), raw_indices.end());
+            cached->minimum = minimum;
+            cached->vertex_count = vertex_count;
+            cached->indices.resize(key.index_count);
+            for (size_t index = 0; index < key.index_count; ++index) {
+                cached->indices[index] = read_index(index) - minimum;
+            }
+        }
+        cached->raw_vertices.assign(raw_vertices.begin(), raw_vertices.end());
+        cached->vertices = std::move(vertices);
+    }
+    cached->last_frame = render_trace_frame;
+    oot_actor_parts[observation.index] = {
+        .geometry = static_cast<size_t>(cached - oot_actor_geometry.begin()),
+        .extent = oot_motion.extent,
+        .view_projection = view_projection,
+        .shader_hash = shader_hash,
+        .influences = influences,
+        .bone_count = bone_count,
+    };
+}
 
-    mesh = {std::move(vertices), std::move(indices), now.origin, before.origin, now.bones, before.bones};
+/// Assemble one batch only after every pass has had a chance to expose an ambiguous identity.
+void RasterizerVulkan::ReadOcarinaActors() {
+    oot_actor_motion.Clear();
+    oot_actor_pose_pairs.clear();
+    const auto& entries = oot_actor_history.Entries();
+    for (size_t index = 0; index < entries.size(); ++index) {
+        const auto& entry = entries[index];
+        const auto& part = oot_actor_parts[index];
+        if (entry.ambiguous || part.geometry >= oot_actor_geometry.size() ||
+            entry.key.channel != gpu_memory || part.extent.width != oot_motion.extent.width ||
+            part.extent.height != oot_motion.extent.height ||
+            part.view_projection != oot_motion.current) {
+            continue;
+        }
+        const auto& geometry = oot_actor_geometry[part.geometry];
+        const auto& vertices = geometry.vertices;
+        if (vertices.size() > std::numeric_limits<u32>::max() - oot_actor_motion.vertices.size()) {
+            continue;
+        }
+        if (!entry.previous_pose) {
+            ++oot_actor_rejections[static_cast<size_t>(OcarinaActorRejection::History)];
+            continue;
+        }
+        const std::pair pair{entry.pose, *entry.previous_pose};
+        const auto found = std::ranges::find(oot_actor_pose_pairs, pair);
+        const u32 pose_index = static_cast<u32>(found - oot_actor_pose_pairs.begin());
+        if (found == oot_actor_pose_pairs.end()) {
+            oot_actor_pose_pairs.push_back(pair);
+            oot_actor_motion.current_poses.push_back(oot_actor_history.Poses()[entry.pose]);
+            oot_actor_motion.previous_poses.push_back(
+                oot_actor_history.PreviousPoses()[*entry.previous_pose]);
+        }
+        const u32 vertex_offset = static_cast<u32>(oot_actor_motion.vertices.size());
+        oot_actor_motion.vertices.insert(oot_actor_motion.vertices.end(), vertices.begin(),
+                                          vertices.end());
+        for (auto& vertex : std::span{oot_actor_motion.vertices}.subspan(vertex_offset)) {
+            vertex.pose_index = pose_index;
+        }
+        for (const u32 value : geometry.indices) {
+            oot_actor_motion.indices.push_back(vertex_offset + value);
+        }
+        if (std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr) {
+            // Where the mesh sits (every 8th vertex, skinned with this frame's pose), to tell
+            // which part of an actor a probe line is about.
+            VideoCommon::OcarinaActorMeshInfo info{
+                .first_index = static_cast<u32>(oot_actor_motion.indices.size() -
+                                                geometry.indices.size()),
+                .index_count = static_cast<u32>(geometry.indices.size()),
+                .vertex_count = static_cast<u32>(vertices.size()),
+                .shader_hash = part.shader_hash,
+                .influences = part.influences,
+                .bone_count = part.bone_count,
+                .instance_tag = entry.key.instance_tag,
+            };
+            const auto& bones = oot_actor_history.Poses()[entry.pose].bones;
+            std::array<f32, 3> low{1e30f, 1e30f, 1e30f};
+            std::array<f32, 3> high{-1e30f, -1e30f, -1e30f};
+            for (size_t v = 0; v < vertices.size(); v += 8) {
+                const auto& vertex = vertices[v];
+                std::array<f32, 3> world{};
+                for (size_t i = 0; i < 8; ++i) {
+                    const f32* m = bones.data() + size_t{vertex.joints[i]} * 12;
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        world[axis] += vertex.weights[i] *
+                                       (m[axis * 4] * vertex.position[0] +
+                                        m[axis * 4 + 1] * vertex.position[1] +
+                                        m[axis * 4 + 2] * vertex.position[2] + m[axis * 4 + 3]);
+                    }
+                }
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    low[axis] = std::min(low[axis], world[axis]);
+                    high[axis] = std::max(high[axis], world[axis]);
+                }
+            }
+            info.low = low;
+            info.high = high;
+            oot_actor_motion.meshes.push_back(info);
+        }
+        ++oot_actor_motion.mesh_count;
+    }
 }
 
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
@@ -3135,9 +3539,10 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format != output_format) {
         return fail("unsupported storage format");
     }
-    // Without Link's pose the mesh stays empty and the motion comes from the camera alone.
-    OcarinaActorMesh mesh{};
-    ReadOcarinaActor(mesh);
+    {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaActorAssembly};
+        ReadOcarinaActors();
+    }
     try {
         const auto target_view =
             target.StorageView(Shader::TextureType::Color2D, Shader::ImageFormat::Typeless, false);
@@ -3160,10 +3565,14 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         const VkExtent2D output_extent = native_resolution ? extent
                                          : upscale_4k      ? VkExtent2D{3840, 2160}
                                                            : target_extent;
-        const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
-                                                   extent, output_extent, target_extent, oot_motion.current,
-                                                   oot_motion.previous, mesh, depth.ImageHandle(),
-                                                   render_trace_frame, jitter);
+        bool recorded;
+        {
+            VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaUpscale};
+            recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view, extent,
+                                             output_extent, target_extent, oot_motion.current,
+                                             oot_motion.previous, oot_actor_motion,
+                                             depth.ImageHandle(), render_trace_frame, jitter);
+        }
         if (!recorded) {
             return fail("temporal upscaler declined the frame");
         }
@@ -3262,7 +3671,21 @@ void RasterizerVulkan::TickFrame() {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Frame);
     }
     frame_dump.TickFrame();
+    static const bool actor_trace = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
+    if (actor_trace && program_id == 0x0400486024DEC000ULL && render_trace_frame % 120 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina actor totals frame={} meshes={} poses={} vertices={} indices={} "
+                 "captured_meshes={} captured_poses={} duplicates={} "
+                 "rejected(draw,targets,camera,cbuf,unsupported_layout,pose,indices,vertices,"
+                 "ambiguous,history)=({})",
+                 render_trace_frame, oot_actor_motion.mesh_count,
+                 oot_actor_motion.current_poses.size(), oot_actor_motion.vertices.size(),
+                 oot_actor_motion.indices.size(), oot_actor_history.Entries().size(),
+                 oot_actor_history.Poses().size(), oot_actor_duplicates,
+                 fmt::join(oot_actor_rejections, ","));
+    }
     ++render_trace_frame;
+    BeginOcarinaActorFrame();
     render_trace_draws = 0;
     render_trace_clears = 0;
     if (Common::DkbFrameTrace::Enabled()) {

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 
 #include "common/logging.h"
@@ -110,17 +111,16 @@ constexpr VkImageSubresourceRange MOTION_RANGE{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 
 struct ActorTransforms {
     std::array<f32, 16> current;
     std::array<f32, 16> previous;
-    std::array<f32, 4> current_origin;
-    std::array<f32, 4> previous_origin;
     std::array<f32, 2> extent;
     std::array<f32, 2> jitter; ///< the scene's viewport offset this frame (render pixels)
 };
+static_assert(sizeof(ActorTransforms) == 144);
 
 vk::Buffer UploadActorData(MemoryAllocator& allocator, std::span<const std::byte> data,
-                           VkBufferUsageFlags usage) {
+                           VkBufferUsageFlags usage, size_t capacity) {
     auto buffer = allocator.CreateBuffer(VkBufferCreateInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = data.size(),
+        .size = capacity,
         .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     }, MemoryUsage::Upload);
@@ -129,23 +129,45 @@ vk::Buffer UploadActorData(MemoryAllocator& allocator, std::span<const std::byte
     return buffer;
 }
 
+vk::Image CreateOcarinaImage(MemoryAllocator& allocator, VkExtent2D extent, VkFormat format,
+                            VkImageUsageFlags usage);
+vk::ImageView CreateOcarinaView(const Device& device, VkImage image, VkFormat format);
+
 class ActorOverlay {
 public:
-    ActorOverlay(const Device& device, MemoryAllocator& allocator, const OcarinaActorMesh& mesh,
+    ActorOverlay(const Device& device, MemoryAllocator& allocator,
+                 const VideoCommon::OcarinaActorMotion& motion,
                  const ActorTransforms& transforms, VkImageView depth_view, VkSampler sampler,
                  VkImageView motion_view, VkExtent2D extent_)
         : extent{extent_}, jitter{transforms.jitter},
-          index_count{static_cast<u32>(mesh.indices.size())}, vertex_bytes{mesh.vertices.size()},
-          vertices{UploadActorData(allocator, std::as_bytes(std::span{mesh.vertices}),
-                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)},
-          indices{UploadActorData(allocator, std::as_bytes(std::span{mesh.indices}),
-                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT)},
-          current{UploadActorData(allocator, std::as_bytes(std::span{mesh.current_bones}),
-                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)},
-          previous{UploadActorData(allocator, std::as_bytes(std::span{mesh.previous_bones}),
-                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)},
+          index_count{static_cast<u32>(motion.indices.size())},
+          vertex_capacity{motion.vertices.size() * sizeof(VideoCommon::OcarinaActorVertex)},
+          index_capacity{motion.indices.size() * sizeof(u32)},
+          pose_capacity{motion.current_poses.size() * sizeof(VideoCommon::OcarinaActorPose)},
+          vertices{UploadActorData(allocator, std::as_bytes(std::span{motion.vertices}),
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_capacity)},
+          indices{UploadActorData(allocator, std::as_bytes(std::span{motion.indices}),
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT, index_capacity)},
+          current{UploadActorData(allocator, std::as_bytes(std::span{motion.current_poses}),
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, pose_capacity)},
+          previous{UploadActorData(allocator, std::as_bytes(std::span{motion.previous_poses}),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, pose_capacity)},
           uniform{UploadActorData(allocator, std::as_bytes(std::span{&transforms, 1}),
-                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)} {
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(ActorTransforms))},
+          probe{allocator.CreateBuffer(VkBufferCreateInfo{
+              .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+              .size = PROBE_BYTES,
+              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+              .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+          }, MemoryUsage::Upload)} {
+        std::memset(probe.Mapped().data(), 0, PROBE_BYTES);
+        probe.Flush();
+        meshes = motion.meshes;
+        // The probe image is only read and written under the contract trace.
+        nearest = CreateOcarinaImage(allocator, meshes.empty() ? VkExtent2D{1, 1} : extent,
+                                     VK_FORMAT_R32_UINT,
+                                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        nearest_view = CreateOcarinaView(device, *nearest, VK_FORMAT_R32_UINT);
         const auto& logical = device.GetLogical();
         const std::array bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT},
@@ -154,15 +176,20 @@ public:
                                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
             VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT},
+            VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT},
+            VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT},
         };
         set_layout = logical.CreateDescriptorSetLayout({
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .bindingCount = static_cast<u32>(bindings.size()), .pBindings = bindings.data(),
         });
         const std::array sizes{
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
         };
         descriptor_pool = logical.CreateDescriptorPool({
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -178,8 +205,11 @@ public:
             VkDescriptorBufferInfo{*current, 0, VK_WHOLE_SIZE},
             VkDescriptorBufferInfo{*previous, 0, VK_WHOLE_SIZE},
             VkDescriptorBufferInfo{*uniform, 0, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{*probe, 0, VK_WHOLE_SIZE},
         };
         const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
+        const VkDescriptorImageInfo nearest_info{VK_NULL_HANDLE, *nearest_view,
+                                                 VK_IMAGE_LAYOUT_GENERAL};
         const std::array writes{
             VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, 1,
                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[0]},
@@ -189,9 +219,13 @@ public:
                                  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buffers[2]},
             VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 3, 0, 1,
                                  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depth},
+            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 4, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[3]},
+            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 5, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &nearest_info},
         };
         logical.UpdateDescriptorSets(writes, {});
-        const VkPushConstantRange depth_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32)};
+        const VkPushConstantRange depth_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3 * sizeof(u32)};
         layout = logical.CreatePipelineLayout({
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1, .pSetLayouts = &raw_layout,
@@ -223,58 +257,164 @@ public:
         pipeline = MakePipeline(logical);
     }
 
-    /// Reuse the mesh and update the two poses only while the vertex and index data still match.
-    bool Update(const Device& device, const OcarinaActorMesh& mesh,
+    /// The owning frame slot is idle before buffers or descriptors are changed.
+    void Update(const Device& device, MemoryAllocator& allocator,
+                const VideoCommon::OcarinaActorMotion& motion,
                 const ActorTransforms& transforms, VkImageView depth_view, VkSampler sampler) {
-        const auto vertex_data = std::as_bytes(std::span{mesh.vertices});
-        const auto index_data = std::as_bytes(std::span{mesh.indices});
-        if (vertex_data.size() != vertex_bytes || mesh.indices.size() != index_count) {
-            return false;
-        }
-        const auto upload = [](vk::Buffer& buffer, std::span<const std::byte> data) {
-            std::memcpy(buffer.Mapped().data(), data.data(), data.size());
-            buffer.Flush();
+        ReportProbe();
+        meshes = motion.meshes;
+        const auto upload = [&](vk::Buffer& buffer, size_t& capacity,
+                                std::span<const std::byte> data, VkBufferUsageFlags usage) {
+            if (data.size() > capacity) {
+                const size_t grown = capacity <= std::numeric_limits<size_t>::max() / 2
+                                         ? capacity * 2 : data.size();
+                const size_t limit = usage == VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                         ? static_cast<size_t>(device.GetMaxStorageBufferRange())
+                                         : std::numeric_limits<size_t>::max();
+                capacity = std::max(data.size(), std::min(grown, limit));
+                buffer = UploadActorData(allocator, data, usage, capacity);
+            } else {
+                std::memcpy(buffer.Mapped().data(), data.data(), data.size());
+                buffer.Flush();
+            }
         };
-        upload(vertices, vertex_data);
-        upload(indices, index_data);
-        upload(current, std::as_bytes(std::span{mesh.current_bones}));
-        upload(previous, std::as_bytes(std::span{mesh.previous_bones}));
-        upload(uniform, std::as_bytes(std::span{&transforms, 1}));
+        upload(vertices, vertex_capacity, std::as_bytes(std::span{motion.vertices}),
+               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        upload(indices, index_capacity, std::as_bytes(std::span{motion.indices}),
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        // Both pose tables always have the same capacity and matching pose indices.
+        size_t previous_capacity = pose_capacity;
+        upload(current, pose_capacity, std::as_bytes(std::span{motion.current_poses}),
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        upload(previous, previous_capacity, std::as_bytes(std::span{motion.previous_poses}),
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memcpy(uniform.Mapped().data(), &transforms, sizeof(transforms));
+        uniform.Flush();
+        index_count = static_cast<u32>(motion.indices.size());
         jitter = transforms.jitter;
-        const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
-        const VkWriteDescriptorSet write{
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 3, 0, 1,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depth,
+        const std::array buffers{
+            VkDescriptorBufferInfo{*current, 0,
+                motion.current_poses.size() * sizeof(VideoCommon::OcarinaActorPose)},
+            VkDescriptorBufferInfo{*previous, 0,
+                motion.previous_poses.size() * sizeof(VideoCommon::OcarinaActorPose)},
         };
-        device.GetLogical().UpdateDescriptorSets(write, {});
-        return true;
+        const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
+        const std::array writes{
+            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 0, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[0]},
+            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 1, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[1]},
+            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 3, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depth},
+        };
+        device.GetLogical().UpdateDescriptorSets(writes, {});
     }
 
     void Draw(vk::CommandBuffer cmd) const {
-        cmd.BeginRenderPass({
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = *render_pass,
-            .framebuffer = *framebuffer,
-            .renderArea = {{0, 0}, extent},
-        }, VK_SUBPASS_CONTENTS_INLINE);
-        cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
-        cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *layout, 0, sets[0], {});
-        // Offset like the game's jittered draws, so the replay rasterizes the same samples and its
-        // depth matches the scene depth (unjittered, the depth test below dropped most of Link).
-        const VkViewport viewport{jitter[0], static_cast<f32>(extent.height) + jitter[1],
-                                  static_cast<f32>(extent.width), -static_cast<f32>(extent.height),
-                                  0, 1};
-        cmd.SetViewport(0, viewport);
-        // Depth matches in the captured replay leveled off at this tolerance.
-        constexpr u32 depth_tolerance = 16;
-        cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT, depth_tolerance);
-        cmd.BindVertexBuffer(0, *vertices, 0);
-        cmd.BindIndexBuffer(*indices, 0, VK_INDEX_TYPE_UINT16);
+        // The replay's visible surface sits up to 256 ULP in front of the scene depth for most
+        // of a session (measured with the contract trace's probe), and the surfaces it hides
+        // start beyond 4096. The former 16 dropped most of Link.
+        constexpr u32 depth_tolerance = 512;
+        const auto begin = [&] {
+            cmd.BeginRenderPass({
+                .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                .renderPass = *render_pass,
+                .framebuffer = *framebuffer,
+                .renderArea = {{0, 0}, extent},
+            }, VK_SUBPASS_CONTENTS_INLINE);
+            cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+            cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *layout, 0, sets[0], {});
+            // Offset like the game's jittered draws, so the replay rasterizes the same samples and
+            // its depth matches the scene depth (unjittered, the depth test below dropped most of
+            // Link).
+            const VkViewport viewport{jitter[0], static_cast<f32>(extent.height) + jitter[1],
+                                      static_cast<f32>(extent.width),
+                                      -static_cast<f32>(extent.height), 0, 1};
+            cmd.SetViewport(0, viewport);
+            cmd.BindVertexBuffer(0, *vertices, 0);
+            cmd.BindIndexBuffer(*indices, 0, VK_INDEX_TYPE_UINT32);
+        };
+        // The nearest image is in GENERAL from here on; the scene depth was never written by it.
+        static constexpr VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                            VkImageMemoryBarrier{
+                                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                .srcAccessMask = 0,
+                                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .image = *nearest,
+                                .subresourceRange = range,
+                            });
+        if (meshes.empty()) {
+            begin();
+            cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                              std::array{depth_tolerance, ~0U, 0U});
+            cmd.DrawIndexed(index_count, 1, 0, 0, 0);
+            cmd.EndRenderPass();
+            return;
+        }
+        // Contract trace: first the nearest replay depth of every pixel, then one draw per mesh
+        // so the probe counts each mesh's visible fragments on its own row.
+        cmd.ClearColorImage(*nearest, VK_IMAGE_LAYOUT_GENERAL,
+                            VkClearColorValue{.uint32 = {~0U, ~0U, ~0U, ~0U}}, range);
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            0, VkMemoryBarrier{
+                                   .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                   .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                   .dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                                    VK_ACCESS_SHADER_WRITE_BIT,
+                               });
+        begin();
+        cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                          std::array{depth_tolerance, ~0U, 1U});
         cmd.DrawIndexed(index_count, 1, 0, 0, 0);
+        cmd.EndRenderPass();
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                            VkMemoryBarrier{
+                                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                            });
+        begin();
+        for (u32 mesh = 0; mesh < meshes.size(); ++mesh) {
+            cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                              std::array{depth_tolerance, std::min(mesh, PROBE_ROWS - 1), 0U});
+            cmd.DrawIndexed(meshes[mesh].index_count, 1, meshes[mesh].first_index, 0, 0);
+        }
         cmd.EndRenderPass();
     }
 
 private:
+    /// Contract trace: log and clear what the previous use of this slot counted. The slot is
+    /// idle, so the GPU has finished writing the counters.
+    void ReportProbe() {
+        if (meshes.empty()) {
+            return;
+        }
+        static u32 reports{};
+        const bool log = reports++ % 120 == 0;
+        auto* const counts = reinterpret_cast<u32*>(probe.Mapped().data());
+        for (u32 mesh = 0; log && mesh < meshes.size() && mesh < PROBE_ROWS; ++mesh) {
+            const auto& info = meshes[mesh];
+            const u32* row = counts + mesh * 12;
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina actor probe mesh={} shader={:016x} tag={} influences={} bones={} "
+                     "vertices={} indices={} low=({:.2f},{:.2f},{:.2f}) high=({:.2f},{:.2f},{:.2f}) "
+                     "fragments={} visible={} depth_match={} nearer(256,4096,65536,more)=({},{},{},{}) "
+                     "farther=({},{},{},{}) written={}",
+                     mesh, info.shader_hash, info.instance_tag, info.influences, info.bone_count,
+                     info.vertex_count, info.index_count, info.low[0], info.low[1], info.low[2],
+                     info.high[0], info.high[1], info.high[2], row[0], row[1], row[2], row[3],
+                     row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]);
+        }
+        std::memset(counts, 0, PROBE_BYTES);
+        probe.Flush();
+    }
+
     vk::Pipeline MakePipeline(const vk::Device& logical) const {
         const auto vertex = logical.CreateShaderModule({
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -290,13 +430,15 @@ private:
             VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                             nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, *fragment, "main"},
         };
-        const VkVertexInputBindingDescription binding{0, 48, VK_VERTEX_INPUT_RATE_VERTEX};
+        const VkVertexInputBindingDescription binding{
+            0, sizeof(VideoCommon::OcarinaActorVertex), VK_VERTEX_INPUT_RATE_VERTEX};
         const std::array attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
-            VkVertexInputAttributeDescription{4, 0, VK_FORMAT_R8G8B8A8_UNORM, 40},
-            VkVertexInputAttributeDescription{5, 0, VK_FORMAT_R8G8B8A8_UNORM, 44},
+            VkVertexInputAttributeDescription{4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 28},
+            VkVertexInputAttributeDescription{5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 44},
             VkVertexInputAttributeDescription{6, 0, VK_FORMAT_R16G16B16A16_UINT, 12},
             VkVertexInputAttributeDescription{7, 0, VK_FORMAT_R16G16B16A16_UINT, 20},
+            VkVertexInputAttributeDescription{8, 0, VK_FORMAT_R32_UINT, 60},
         };
         const VkPipelineVertexInputStateCreateInfo vertex_input{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -347,8 +489,13 @@ private:
     VkExtent2D extent;
     std::array<f32, 2> jitter; ///< ActorTransforms::jitter of the last upload
     u32 index_count;
-    size_t vertex_bytes;
-    vk::Buffer vertices, indices, current, previous, uniform;
+    size_t vertex_capacity, index_capacity, pose_capacity;
+    static constexpr u32 PROBE_ROWS = 64;
+    static constexpr size_t PROBE_BYTES = PROBE_ROWS * 12 * sizeof(u32);
+    vk::Buffer vertices, indices, current, previous, uniform, probe;
+    vk::Image nearest; ///< contract trace: the replay's nearest depth per pixel
+    vk::ImageView nearest_view;
+    std::vector<VideoCommon::OcarinaActorMeshInfo> meshes; ///< of the last upload; contract trace
     vk::DescriptorSetLayout set_layout;
     vk::DescriptorPool descriptor_pool;
     vk::DescriptorSets sets;
@@ -920,7 +1067,7 @@ VkImageView OcarinaUpscaler::CompositedView() const {
 bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
-                            const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame,
+                            const VideoCommon::OcarinaActorMotion& motion, VkImage depth_image, u64 frame,
                             std::array<f32, 2> jitter) {
     auto& state = *impl;
     if (state.last_frame == frame || state.Failed()) {
@@ -944,17 +1091,25 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     auto& resources = **slot;
     const VkSampler sampler = state.PointSampler();
     const ActorTransforms actor_transforms{
-        current, previous, mesh.current_origin, mesh.previous_origin,
+        current, previous,
         {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, jitter,
     };
-    // Without Link's pose (dialogue, cutscenes, first person) the motion comes from the camera alone.
-    if (mesh.indices.empty()) {
-        resources.overlay.reset();
-    } else if (!resources.overlay ||
-               !resources.overlay->Update(state.device, mesh, actor_transforms, depth, sampler)) {
-        resources.overlay = std::make_unique<ActorOverlay>(state.device, state.allocator, mesh,
-                                                            actor_transforms, depth, sampler,
-                                                            *resources.motion_view, extent);
+    // Keep idle GPU storage when no actor has consecutive-frame pose history.
+    const bool has_actor_motion = !motion.vertices.empty() && !motion.indices.empty() &&
+        !motion.current_poses.empty() &&
+        motion.current_poses.size() == motion.previous_poses.size() &&
+        motion.indices.size() <= std::numeric_limits<u32>::max() &&
+        motion.current_poses.size() <= state.device.GetMaxStorageBufferRange() /
+                                          sizeof(VideoCommon::OcarinaActorPose);
+    if (has_actor_motion) {
+        if (!resources.overlay) {
+            resources.overlay = std::make_unique<ActorOverlay>(state.device, state.allocator, motion,
+                                                              actor_transforms, depth, sampler,
+                                                              *resources.motion_view, extent);
+        } else {
+            resources.overlay->Update(state.device, state.allocator, motion, actor_transforms,
+                                      depth, sampler);
+        }
     }
 
     state.scheduler.RequestOutsideRenderPassOperationContext();
@@ -963,7 +1118,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.queue.AddImage(*resources.motion_view);
     resources.tick = state.scheduler.CurrentTick();
     state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), {*transform, jitter},
-                             *resources.motion, extent, resources.overlay.get());
+                             *resources.motion, extent,
+                             has_actor_motion ? resources.overlay.get() : nullptr);
     state.queue.Acquire(state.scheduler, 2);
     state.queue.AddSampledImage(color, sampler);
     state.queue.AddImage(*resources.color_view);

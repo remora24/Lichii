@@ -6,6 +6,38 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Bundle native Linux FSR 4.1.2 shaders, model weights, notices, and backend source in builds and
+  x86_64 AppImages/tarballs. Resolve assets relative to the executable without requiring
+  `LICHII_FSR412_ASSETS_DIR` or a separate asset installation.
+- Fix native Linux FSR 4.1.2 motion dilation by preserving Ocarina's standard depth instead of
+  reversing it. The bundled prepass selects minimum depth, so reversed input selected background
+  motion at foreground boundaries.
+- Fix blurry, ghosting animated characters in the Ocarina temporal replacement. The actor motion
+  replay matched one vertex shader, one 8-weight mesh and one pose per frame, so every other
+  colour variant and skinned part kept camera-only motion. Capture now follows the game's skinning
+  contract (1-8 bone influences, any position/bone/weight attribute layout) across all of a
+  character's draws, deduplicates repeats, and replays each part with its own current and previous
+  pose in one overlay draw.
+- Fix Ocarina actor-motion capture rejecting every skinned draw because uniform-cache bindings
+  do not retain guest GPU addresses. Resolve c3/c4/c6 through Maxwell's live constant-buffer
+  state while preserving size, mapping, and memory-coherency checks.
+- Fix native Ocarina actor geometry being rejected against unused legacy index and vertex
+  limits. Actor capture now checks native byte-count bounds, including first-index offsets,
+  before replaying current and previous poses into the FSR motion image.
+- Support smaller actor bone palettes in Ocarina instead of requiring Link's 13568-byte c6
+  binding. Capture only available matrices, reject active joints outside the captured palette,
+  and zero-pad the fixed replay pose without reading past the binding.
+- Fix ghosting on Link's hat and shield, and on most enemies, with Ocarina's temporal upscaling
+  (FSR 3.1 and FSR 4). The replay dropped most visible actor pixels at a 16-ULP depth check
+  (now 512), rejected half-float vertex positions (the shield), and read the bone palette from
+  constant buffer 6 where some shader variants keep it in 7 (Link's hair, which is now replayed
+  but still matches the scene depth on only about a quarter of its pixels). The contract trace
+  now logs each rejected draw and measures per mesh how many visible fragments are written.
+- Cut the Ocarina actor capture's per-frame cost from about 1.5 ms to 0.5 ms of GPU-thread time
+  by keeping each skinned mesh's decoded geometry and reusing it while the guest bytes are
+  unchanged (they are compared every frame). `EDEN_NX2_GPU_PROFILE` reports the capture's
+  checks, pose, geometry and assembly time and the Ocarina upscale as separate zones.
+
 ## [0.1.0]
 
 - Initial release candidate

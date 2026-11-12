@@ -5,9 +5,9 @@
 
 #include <array>
 #include <memory>
-#include <vector>
 
 #include "common/common_types.h"
+#include "video_core/ocarina_actor_motion.h"
 #include "video_core/ocarina_upscale.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -23,15 +23,6 @@ class StagingBufferPool;
 /// The temporal upscaler Ocarina uses this session: the settings, EDEN_NX2_DLSS_REPLACEMENT,
 /// DLSS availability, and native when FSR 3.1 is unsupported on the device.
 [[nodiscard]] VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device);
-
-struct OcarinaActorMesh {
-    std::vector<u8> vertices;
-    std::vector<u16> indices;
-    std::array<f32, 4> current_origin;
-    std::array<f32, 4> previous_origin;
-    std::array<f32, 280 * 12> current_bones;
-    std::array<f32, 280 * 12> previous_bones;
-};
 
 class OcarinaUpscaler {
 public:
@@ -58,7 +49,7 @@ public:
     /// the guest dispatch in charge. The scheduler checks EvaluationFailed before skipping it.
     bool Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                 VkExtent2D output_extent, VkExtent2D target_extent, const std::array<f32, 16>& current,
-                const std::array<f32, 16>& previous, const OcarinaActorMesh& mesh,
+                const std::array<f32, 16>& previous, const VideoCommon::OcarinaActorMotion& motion,
                 VkImage depth_image, u64 frame, std::array<f32, 2> jitter = {});
 
 private:

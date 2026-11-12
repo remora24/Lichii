@@ -368,6 +368,8 @@ add_library(video_core STATIC
     video_core.h
 )
 
+target_sources(video_core PRIVATE ocarina_actor_motion.cpp ocarina_actor_motion.h ocarina_actor_history.h)
+
 # Experimental native Linux FSR 4.1.2 backend, based on BeamNG's independent Vulkan
 # implementation. Disabled by default; requires an external source checkout and assets.
 option(ENABLE_LICHII_LINUX_FSR412 "Build experimental BeamNG-derived Linux FSR 4.1.2 backend" OFF)
@@ -381,6 +383,95 @@ if(ENABLE_LICHII_LINUX_FSR412)
        NOT EXISTS "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h")
         message(FATAL_ERROR "Set LICHII_BEAMNG_FSR412_ROOT to a BeamNG FSR4 checkout (v0.2.1)")
     endif()
+
+    # Validate every generic tier/model before allowing a native backend build.
+    file(READ "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp" fsr412_backend_source)
+    string(REGEX MATCH "kPasses\\[\\][ \t\r\n]*=[ \t\r\n]*\\{[^}]+\\}"
+        fsr412_pass_block "${fsr412_backend_source}")
+    string(REGEX MATCHALL "\"[a-z0-9_]+\"" fsr412_passes "${fsr412_pass_block}")
+    list(LENGTH fsr412_passes fsr412_pass_count)
+    if(NOT fsr412_pass_count EQUAL 29)
+        message(FATAL_ERROR "Expected 29 FSR4 passes in fsr411.cpp from v0.2.1")
+    endif()
+    set(fsr412_required_files
+        "${LICHII_BEAMNG_FSR412_ROOT}/assets/NOTICE.md"
+        "${LICHII_BEAMNG_FSR412_ROOT}/LICENSE"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices/AMD-SDK-LICENSE.md"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices/BC250-MIT"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices/dxil-spirv-LICENSE.MIT"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices/FSR-4.1.1-linux-NOTICE.md"
+    )
+    foreach(tier IN ITEMS 1080 2160 4320)
+        foreach(model IN ITEMS 0 1)
+            set(fsr412_asset_dir "${LICHII_BEAMNG_FSR412_ROOT}/assets/t${tier}_m${model}")
+            foreach(pass IN LISTS fsr412_passes)
+                string(REPLACE "\"" "" pass "${pass}")
+                if(pass STREQUAL "prepass")
+                    set(pass prepass_portable)
+                endif()
+                list(APPEND fsr412_required_files "${fsr412_asset_dir}/${pass}.spv")
+            endforeach()
+            set(fsr412_initializer "${fsr412_asset_dir}/initializer.bin")
+            if(NOT EXISTS "${fsr412_initializer}" OR IS_DIRECTORY "${fsr412_initializer}")
+                message(FATAL_ERROR "Missing FSR4 package data: ${fsr412_initializer}")
+            endif()
+            file(SIZE "${fsr412_initializer}" fsr412_initializer_size)
+            if(NOT fsr412_initializer_size EQUAL 131072)
+                message(FATAL_ERROR "FSR4 initializer must be 131072 bytes: ${fsr412_initializer}")
+            endif()
+            list(APPEND fsr412_required_files "${fsr412_initializer}")
+        endforeach()
+    endforeach()
+    foreach(asset IN LISTS fsr412_required_files)
+        if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+            message(FATAL_ERROR "Missing FSR4 package data: ${asset}")
+        endif()
+    endforeach()
+
+    # Track additions, removals and content updates without recopying unchanged builds.
+    file(GLOB_RECURSE fsr412_bundle_files CONFIGURE_DEPENDS LIST_DIRECTORIES false
+        "${LICHII_BEAMNG_FSR412_ROOT}/assets/*"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices/*"
+    )
+    list(APPEND fsr412_bundle_files
+        "${LICHII_BEAMNG_FSR412_ROOT}/LICENSE"
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp"
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h"
+    )
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${fsr412_required_files} "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fsr412-bundle-files.txt"
+        CONTENT "${fsr412_bundle_files}\n")
+    set(fsr412_bundle_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fsr412")
+    set(fsr412_bundle_stamp "${CMAKE_CURRENT_BINARY_DIR}/fsr412-bundle.stamp")
+    add_custom_command(OUTPUT "${fsr412_bundle_stamp}"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${fsr412_bundle_dir}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${fsr412_bundle_dir}/fsr411"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${LICHII_BEAMNG_FSR412_ROOT}/assets" "${fsr412_bundle_dir}/assets"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${LICHII_BEAMNG_FSR412_ROOT}/notices" "${fsr412_bundle_dir}/notices"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${LICHII_BEAMNG_FSR412_ROOT}/LICENSE" "${fsr412_bundle_dir}/LICENSE"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp"
+            "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h" "${fsr412_bundle_dir}/fsr411"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${fsr412_bundle_stamp}"
+        DEPENDS ${fsr412_bundle_files} "${CMAKE_CURRENT_BINARY_DIR}/fsr412-bundle-files.txt"
+        VERBATIM
+    )
+    add_custom_target(fsr412_bundle DEPENDS "${fsr412_bundle_stamp}")
+    add_dependencies(video_core fsr412_bundle)
+    install(DIRECTORY
+        "${LICHII_BEAMNG_FSR412_ROOT}/assets"
+        "${LICHII_BEAMNG_FSR412_ROOT}/notices"
+        DESTINATION share/lichii/fsr412 COMPONENT Fsr412)
+    install(FILES "${LICHII_BEAMNG_FSR412_ROOT}/LICENSE"
+        DESTINATION share/lichii/fsr412 COMPONENT Fsr412)
+    install(FILES
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.cpp"
+        "${LICHII_BEAMNG_FSR412_ROOT}/fsr411/fsr411.h"
+        DESTINATION share/lichii/fsr412/fsr411 COMPONENT Fsr412)
     # Lichii already provides Vulkan::Headers from CPM, including on distributions
     # where system vulkan-headers are not installed. BeamNG's fsr411.cpp also calls
     # Vulkan's exported entry points directly, so only the Vulkan loader library

@@ -85,6 +85,14 @@ Both the scheme-preparation job and the publishing job check out CI helper scrip
 
 The existing build steps use the repository's current CMake targets (`yuzu` and `yuzu-cmd`) and package the produced `eglantine` and `eden-cli` binaries. Linux AppImages require glibc 2.39 or newer. Linux tarballs hold the same files as the AppImage, unpacked, with `lichii` and `eden-cli` links at the top. The standard Windows build uses clang-cl from a pinned LLVM release (`tools/windows/install-llvm.ps1`, shared with the Windows build-check job) in Release mode with ThinLTO, against the MSVC headers, runtime and SDK. MSVC itself still builds the project for development but is not used for releases. Windows archives contain the deployed runtime dependencies. macOS artifacts are ad-hoc signed, not notarized; Gatekeeper may require the user to approve the app on first launch.
 
+Both Linux x86_64 release variants enable native FSR 4.1.2 and fetch the BeamNG-derived backend
+and shader/model assets at commit `10791f325b66bff7413577c65c5aa7df5ae67dfb` (v0.2.1).
+The `Fsr412` CMake install component stages `usr/share/lichii/fsr412` inside AppDir before
+linuxdeploy creates the AppImage; the tarball retains that same directory. The bundle includes
+the required asset notices, licenses, and backend source. Users do not need a separate asset
+directory or `LICHII_FSR412_ASSETS_DIR`. Native FSR 4.1.2 still requires supported AMD hardware
+and Vulkan features. Linux ARM64, Windows, and macOS packaging do not use this Linux backend.
+
 Build artifacts are retained for seven days. Published GitHub Release assets remain available until a release is deleted. Daily releases are pruned to approximately the seven most recent; branch releases are rolling and are cleaned up when no longer needed.
 
 ## Windows PGO profile

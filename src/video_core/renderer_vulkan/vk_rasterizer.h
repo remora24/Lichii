@@ -9,6 +9,8 @@
 #include <array>
 #include <optional>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
@@ -18,6 +20,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/ocarina_actor_history.h"
 #include "video_core/oot_network.h"
 #include "video_core/ocarina_upscale.h"
 #include "video_core/rasterizer_interface.h"
@@ -192,7 +195,7 @@ private:
     static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
     template <typename Func>
-    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false);
+    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false, u32 instance_count = 1);
 
     void CaptureIndirectTrace();
     void CollectIndirectTrace();
@@ -258,9 +261,10 @@ private:
     /// gets new sample positions each frame (the game renders without jitter). The offset goes to
     /// FSR with the frame.
     void UpdateOcarinaJitter();
-    void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
+    void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect, u32 instance_count);
     bool TryOcarinaUpscale(const ComputePipeline& pipeline, bool replace);
-    void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
+    void ReadOcarinaActors();
+    void BeginOcarinaActorFrame();
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
 
@@ -322,15 +326,42 @@ private:
     std::optional<u64> oot_effects_frame;
     GPUVAddr oot_effects_address{};
     VkImageView oot_effects_scene{};
-    struct OcarinaActorPose {
-        u64 frame{};
-        const Tegra::MemoryManager* channel{};
-        GPUVAddr vertex{};
-        GPUVAddr indices{};
-        s32 base_vertex{};
-        std::array<f32, 4> origin{};
-        std::array<f32, 280 * 12> bones{};
-    } oot_actor, oot_previous_actor;
+    VideoCommon::OcarinaActorHistory oot_actor_history;
+    VideoCommon::OcarinaActorMotion oot_actor_motion;
+    struct OcarinaActorPart {
+        size_t geometry = std::numeric_limits<size_t>::max(); ///< index into oot_actor_geometry
+        VkExtent2D extent{};
+        std::array<f32, 16> view_projection{};
+        u64 shader_hash{};
+        u32 influences{};
+        u32 bone_count{};
+    };
+    std::vector<OcarinaActorPart> oot_actor_parts;
+    /// Decoded skinned geometry, reused while the guest bytes it came from are unchanged. Entries
+    /// are only dropped between frames, so a part's index stays valid within its frame.
+    struct OcarinaActorGeometry {
+        VideoCommon::OcarinaActorGeometryKey key;
+        bool restart{};
+        u32 restart_index{};
+        std::vector<u8> raw_indices;
+        std::vector<u8> raw_vertices;
+        u32 minimum{};
+        u64 vertex_count{};
+        std::vector<VideoCommon::OcarinaActorVertex> vertices;
+        std::vector<u32> indices; ///< relative to the first vertex
+        u64 last_frame{};
+    };
+    std::vector<OcarinaActorGeometry> oot_actor_geometry;
+    std::vector<u8> oot_actor_raw_vertices; ///< staging when guest bytes span mappings
+    std::vector<u8> oot_actor_raw_indices;
+    /// Fallback staging for the bone constants when they span more than one mapping.
+    std::array<u8, VideoCommon::OcarinaActorBoneCount * 12 * sizeof(f32)> oot_actor_raw_pose{};
+    std::vector<std::pair<u32, u32>> oot_actor_pose_pairs;
+    enum class OcarinaActorRejection : size_t {
+        Draw, Targets, Camera, Buffers, Layout, Pose, Indices, Vertices, Ambiguous, History, Count
+    };
+    std::array<u32, static_cast<size_t>(OcarinaActorRejection::Count)> oot_actor_rejections{};
+    u32 oot_actor_duplicates{};
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;
     u32 render_trace_clears = 0;

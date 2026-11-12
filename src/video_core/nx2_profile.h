@@ -74,6 +74,11 @@ enum class Zone : u32 {
     WorkerIdle,           ///< VulkanWorker waiting for work
     PresentWait,          ///< Present waits for the Vulkan worker or a free presentation frame
     QueueSubmit,          ///< vkQueueSubmit
+    OcarinaActors,        ///< Ocarina temporal: skinned-draw checks, pose and history
+    OcarinaActorPose,     ///< Ocarina temporal: reading and deduplicating a bone palette
+    OcarinaActorGeometry, ///< Ocarina temporal: reading and decoding a skinned draw's geometry
+    OcarinaActorAssembly, ///< Ocarina temporal: assembling the frame's replay batch
+    OcarinaUpscale,       ///< Ocarina temporal: motion, replay upload and upscaler recording
     Count,
 };
 
@@ -88,7 +93,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait", "graphics pipeline miss",
     "compute pipeline miss", "pipeline wait", "shader capture", "texture cache", "GPU wait",
     "present", "worker idle",
-    "present wait", "queue submit",
+    "present wait", "queue submit", "ocarina actors", "ocarina actor pose",
+    "ocarina actor geometry", "ocarina actor assembly", "ocarina upscale",
 };
 
 static_assert(static_cast<size_t>(Zone::Count) <= StutterTrace::ZoneSlots);

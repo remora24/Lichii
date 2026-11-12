@@ -68,17 +68,26 @@ TEST_CASE("Descriptor allocation failure preserves reusable storage", "[descript
 TEST_CASE("Descriptor growth clips doubling to its configured ceiling", "[descriptor_payload]") {
     size_t capacity = 8;
     auto storage = std::make_unique<int[]>(64);
-    REQUIRE(GrowDescriptorPayload(
-                storage, capacity, 12, 8, 9, [] {},
-                [](size_t count) {
-                    REQUIRE(count == 96);
-                    return std::make_unique<int[]>(count);
-                }) == PayloadGrowthResult::Grown);
+    size_t allocated_count{};
+    bool drained_at_ceiling{};
+    bool allocated_at_ceiling{};
+    const auto grown = GrowDescriptorPayload(
+        storage, capacity, 12, 8, 9, [] {},
+        [&](size_t count) {
+            allocated_count = count;
+            return std::make_unique<int[]>(count);
+        });
+    REQUIRE(grown == PayloadGrowthResult::Grown);
+    REQUIRE(allocated_count == 96);
     REQUIRE(capacity == 12);
-    REQUIRE(GrowDescriptorPayload(
-                storage, capacity, 12, 8, 12, [] { FAIL("Must not drain at the ceiling"); },
-                [](size_t) -> std::unique_ptr<int[]> {
-                    FAIL("Must not allocate at ceiling");
-                    return {};
-                }) == PayloadGrowthResult::AtLimit);
+    const auto at_limit = GrowDescriptorPayload(
+        storage, capacity, 12, 8, 12,
+        [&] { drained_at_ceiling = true; },
+        [&](size_t) -> std::unique_ptr<int[]> {
+            allocated_at_ceiling = true;
+            return {};
+        });
+    REQUIRE(at_limit == PayloadGrowthResult::AtLimit);
+    REQUIRE_FALSE(drained_at_ceiling);
+    REQUIRE_FALSE(allocated_at_ceiling);
 }

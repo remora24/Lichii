@@ -58,9 +58,33 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
   game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
-  through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
-  skinned draw is replayed with both poses where his depth matches. Without his pose the frame
-  keeps the camera motion. The input is tonemapped: both backends run in LDR without auto exposure.
+  through this and the previous frame's camera (vertex constant buffer 3). Every opaque draw that
+  meets the game's skinning contract is replayed with this and the previous frame's bones where
+  its depth matches: indexed triangles, one instance, no blend or alpha test, depth-tested into
+  the scene, camera constant buffer 3, actor constant buffer 4 (influence count 1-8 and the actor
+  origin), a bone-matrix palette in constant buffer 6 (or 7, for shader variants that keep a
+  material block in 6, such as Link's hair), and position, bone-index and weight attributes in
+  the first vertex stream. Positions are three 32-bit floats or half floats (Link's shield, most
+  enemies). A replayed fragment is kept when its depth is within 512 ULP of the scene depth: the
+  replay's visible surface measured up to 256 ULP in front of the scene's, and hidden surfaces
+  start beyond 4096. The material's shader variant is not part of the contract, so all of a
+  character's colour variants and every 1-8 influence layout are collected. Same-frame repeats of
+  one geometry and one pose are deduplicated; a geometry whose pose changes inside a frame, or
+  with no pose in the frame before, keeps camera motion. Actor capture takes guest GPU addresses
+  from Maxwell's live constant-buffer state, not the uniform cache's unset `gpu_addr` field.
+  It retains the shader-consumed size limit and verifies each GPU-to-device mapping against the
+  cached binding before reading; disabled, truncated, remapped, GPU-written, or pending-write
+  inputs remain rejected. The input is tonemapped: both backends run in LDR without auto exposure.
+  Palette sizes vary between actors. Capture reads only complete 3x4 matrices within the bound
+  c6 range, up to 280 bones, and zero-pads unused replay slots. Active joints must be inside that
+  actor's captured palette; zero-weight joint sentinels remain ignored. Palette size is part of
+  geometry identity so a changed palette cannot reuse incompatible history.
+  Geometry bounds follow the active engine: native C597/C797 index size comes from
+  `SET_INDEX_BUFFER_SIZE_A/B` (`0x238/0x23c`), and vertex size comes from
+  `SET_VERTEX_STREAM_SIZE_A/B` (`0x600/0x604`). Both are byte counts, not legacy end addresses.
+  Capture checks the first-index byte offset and vertex byte span against those counts without
+  overflow; legacy draws retain inclusive address-limit checks. See NVIDIA's
+  [C797 class definitions](https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/3d/clc797.h).
 - FSR's LDR profile uses unit exposure/pre-exposure (no auto exposure), finite standard
   device depth (near 0.1, far 25000), and vertical FOV recovered from the view-projection.
   Its shaders use `HDR_COLOR_INPUT=0` and `INVERTED_DEPTH=0`. Camera reconstruction alone
@@ -76,7 +100,7 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   depth-write flag alone doesn't count. DLSS gets no jitter.
 - Motion with jitter: FSR is told the motion vectors carry no jitter (no jitter-cancellation
   flag). Camera motion comes from the unjittered matrices, reconstructed at each depth sample's
-  unjittered position (the pixel centre minus the jitter). The replay of Link's skinned draw is
+  unjittered position (the pixel centre minus the jitter). The replay of the skinned draws is
   offset by the same jitter, so its scene-depth check compares the same samples the game drew,
   and its motion is taken from the unjittered position. Without that offset the jitter made the
   check fail on most of the fragments it otherwise accepts.
@@ -87,8 +111,8 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   the game's own bias.
 - FSR 4 (Windows, AMD's driver, off by default): with "Use AMD FSR 4 in place of FSR 3.1" on,
   the same inputs, jitter and RCAS setting go to AMD's FSR 4 through AMD's FidelityFX runtime
-  (FidelityFX SDK 2.4.0, FSR Upscaling 4.1.2). Nothing of AMD's ships with Lichii: the setting's
-  panel downloads `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from
+  (FidelityFX SDK 2.4.0, FSR Upscaling 4.1.2). Windows packages do not bundle AMD's
+  runtime DLLs: the setting's panel downloads `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from
   the SDK's GitHub repository at the release commit into the user folder's `fidelityfx` folder,
   after showing AMD's licence. Each file must match its pinned size and SHA-256
   (`vulkan_common/ffx_files.h`) and carry AMD's Authenticode signature, checked after the
@@ -98,6 +122,16 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   stays created and takes over if the files are missing or don't check out, AMD's runtime offers
   no FSR 4 for the GPU, the context can't be created or a dispatch fails. The log says which, and
   shows `Ocarina FSR 4 evaluated` while it runs.
+- FSR 4.1.2 (Linux x86_64, experimental): release AppImages and tarballs include the unofficial
+  INT8 Vulkan backend's shaders and model weights. Enable the native FSR 4.1.2 checkbox by itself;
+  the FSR 3.1 checkbox is not required. Supported AMD hardware and Vulkan driver features are
+  still required, and initialization or dispatch failures fall back to FSR 3.1. No asset download,
+  separate asset directory, or `LICHII_FSR412_ASSETS_DIR` environment variable is needed.
+  The backend finds its bundled files relative to the actual executable, including inside a
+  mounted AppImage, independently of the working directory or a symlink launcher.
+  It passes Ocarina's standard [0,1] depth directly to the bundled prepass. That shader selects
+  the minimum neighboring depth when choosing motion vectors; reversing depth would select
+  background motion at foreground boundaries and corrupt history reprojection.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
   (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
   reactive and transparency/composition masks; missing capture uses zero masks, not stale
@@ -111,8 +145,18 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   `Ocarina temporal: the game's upscale draws frame N (reason)`.
   `EDEN_NX2_DLSS_CONTRACT_TRACE=1` logs every FSR evaluation and scheduler writeback;
   otherwise periodic evaluation/writeback messages avoid a per-frame logging cost.
+  With that trace enabled, every 120th frame also reports the frame's collected meshes, poses and
+  geometry totals, the deduplicated draws and the rejection reasons (draw shape, targets, camera,
+  constant buffers, unsupported skinning layout, pose, indices, vertices, in-frame ambiguity,
+  missing history). On those frames each rejected skinned draw is logged once per shader as
+  `Ocarina actor rejected` with the reason, shader hash, actor tag, influence count, palette
+  size, stride and attribute formats. The replay also runs a probe: `Ocarina actor probe` lines
+  give, per replayed mesh, its skinned bounds and how many of its visible (nearest) fragments
+  match the scene depth, are nearer or are farther, in bands of 256, 4096 and 65536 ULP. A
+  submitted mesh is not proof of motion: only fragments that pass the depth check are written.
+  These diagnostics do not read images back or reset temporal history.
 
-Shader hashes, buffer offsets and Link's mesh shape are taken from the game's current build.
+Shader hashes, buffer offsets and the skinning contract are taken from the game's current build.
 A game update that changes them disables the replacement and leaves the game's pass in place.
 The "Ocarina of Time anti-aliasing" option (No sharpening, docs/nx2/oot-network-bypass.md)
 bypasses the same network on other GPUs. It does nothing while this replacement is enabled:
@@ -136,9 +180,33 @@ from the upstream implementation remain available for diagnostic comparisons.
 
 ## Build and distribution
 
-FSR needs no external runtime. Keep `externals/FidelityFX-SDK/LICENSE.txt` and its attribution
+Built-in FSR 3.1 needs no external runtime. Keep `externals/FidelityFX-SDK/LICENSE.txt` and its attribution
 with distributions. The vendored files are unmodified AMD MIT sources from FidelityFX SDK
 v1.1.4, commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`.
+
+Native Linux FSR 4.1.2 developer builds require
+`-DENABLE_LICHII_LINUX_FSR412=ON -DLICHII_BEAMNG_FSR412_ROOT=/path/to/beamng-fsr4-linux`.
+Use Mob1K7105/beamng-fsr4-linux v0.2.1, commit
+`10791f325b66bff7413577c65c5aa7df5ae67dfb`, including its `assets/` and `notices/` directories.
+The source checkout is a build input, not a runtime dependency. Configuration rejects missing
+required shader files, model initializers, and notices. Building stages the bundle in
+`build/bin/fsr412/`, beside the executable. Installed packages use
+`share/lichii/fsr412/`, relative to the installation prefix; the `Fsr412` CMake install component
+puts the same bundle into `AppDir/usr` before AppImage creation. Both Linux x86_64 release
+variants enable this backend and fetch the pinned checkout automatically; other platforms are unchanged.
+
+After a developer rebuild, verify that `build/CMakeCache.txt` still contains
+`ENABLE_LICHII_LINUX_FSR412:BOOL=ON` and the intended `LICHII_BEAMNG_FSR412_ROOT`.
+A saved `amd_fsr4=true` setting does not prove that the native Linux backend was compiled.
+With this build option off and `ocarina_fsr=false`, that setting alone does not enable the
+Ocarina temporal replacement. During gameplay, confirm `Linux FSR 4.1.2: native INT8 backend
+initialized with standard depth` and subsequent `Ocarina FSR 4 evaluated` messages in the log.
+Initialization alone does not prove that frame evaluation succeeded.
+
+Keep the complete bundle when packaging: `assets/NOTICE.md`, `notices/`, the GPL `LICENSE`,
+and the included `fsr411/` backend source accompany the shaders and weights. The assets derive
+from AMD's FSR SDK 2.4.0 INT8 provider under its DLL's MIT exception. They are translated,
+modified assets, not an AMD-signed or AMD-endorsed distribution; no AMD DLL is bundled.
 
 For the optional Windows NVIDIA path, obtain only the MIT Streamline headers and license
 from NVIDIA-RTX/Streamline tag `v2.14.16`, commit

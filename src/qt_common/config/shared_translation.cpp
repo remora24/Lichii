@@ -177,8 +177,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "FSR 4.1.2 Vulkan implementation. Enable this setting by itself; "
               "the AMD FSR 3.1 checkbox is not required. FSR 3.1 is used "
               "automatically if FSR 4.1.2 cannot initialize or dispatch. "
-              "Requires supported AMD RADV and shader/model assets: set "
-              "LICHII_FSR412_ASSETS_DIR before starting Lichii. "
+              "Requires supported AMD RADV. Shader/model assets are included "
+              "in native FSR 4.1.2 builds and AppImages; no separate setup is needed. "
               "Takes effect on the next game launch."));
 #else
     INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of FSR 3.1"),

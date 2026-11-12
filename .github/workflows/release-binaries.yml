@@ -109,6 +109,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v5
 
+      - name: Check out pinned Linux FSR4 backend and assets
+        if: startsWith(matrix.platform, 'linux-x86_64')
+        uses: actions/checkout@v5
+        with:
+          repository: Mob1K7105/beamng-fsr4-linux
+          ref: 10791f325b66bff7413577c65c5aa7df5ae67dfb
+          path: beamng-fsr412
+
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'linux')
         shell: bash
@@ -125,6 +133,9 @@ jobs:
             libopus-dev libasound2-dev ccache \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+          if [ '${{ runner.arch }}' != 'ARM64' ]; then
+            sudo apt-get install -y --no-install-recommends libvulkan-dev
+          fi
 
       # The packages docs/Deps.md lists for macOS, plus ccache. The runner image can carry a
       # freetype 2.15.0 bottle that links /usr/lib/libhvf.dylib, which macOS has only from 15.4, so
@@ -292,6 +303,12 @@ jobs:
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
           )
+          if [ '${{ runner.arch }}' != 'ARM64' ]; then
+            flags+=(
+              -DENABLE_LICHII_LINUX_FSR412=ON
+              "-DLICHII_BEAMNG_FSR412_ROOT=$PWD/beamng-fsr412"
+            )
+          fi
           if [ '${{ matrix.pgo }}' = 'true' ]; then
             # Same flags Eden's CI passes for its clang PGO build.
             profile="-fprofile-use=$PWD/eglantine.profdata -Wno-backend-plugin \
@@ -435,6 +452,9 @@ jobs:
           export ARCH="$arch"
           mkdir -p AppDir/usr/bin
           cp build/release/bin/nx2_switches.txt AppDir/usr/bin/
+          if [ "$arch" = x86_64 ]; then
+            cmake --install build/release --component Fsr412 --prefix "$PWD/AppDir/usr"
+          fi
           "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
             --executable build/release/bin/lichii \
             --executable build/release/bin/eden-cli \
