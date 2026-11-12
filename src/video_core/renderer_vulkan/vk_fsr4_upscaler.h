@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "common/common_types.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -88,16 +89,23 @@ private:
     void CreateExposure();
 
 #ifdef LICHII_LINUX_FSR412_BEAMNG
-    // Cached views must outlive the submitted commands that reference them.
+    /// A view of an input image. Ocarina rotates its colour and motion images between frame
+    /// slots, so one view per image is kept; a view is destroyed only once the GPU is done with
+    /// the last evaluation that used it.
     struct LinuxInputView {
         VkImage image = VK_NULL_HANDLE;
         VkFormat format = VK_FORMAT_UNDEFINED;
+        VkImageSubresourceRange range{};
         vk::ImageView view;
+        u64 tick{};       ///< scheduler tick of the last evaluation that used it
+        u64 evaluation{}; ///< linux_evaluations when it was last used
     };
     std::unique_ptr<Fsr411::Upscaler> linux_upscaler;
-    LinuxInputView linux_color;
-    LinuxInputView linux_depth;
-    LinuxInputView linux_motion;
+    std::vector<LinuxInputView> linux_views;
+    /// Scheduler ticks of the last evaluations: the backend reuses an evaluation's constant
+    /// buffer slot Fsr411::kFramesInFlight evaluations later.
+    std::array<u64, 8> linux_evaluation_ticks{};
+    u64 linux_evaluations{};
 #endif
 
     const Device& device;

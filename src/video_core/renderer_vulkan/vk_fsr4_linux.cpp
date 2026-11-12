@@ -5,11 +5,13 @@
 // upscaler. Native builds bundle the external implementation and AMD-derived
 // assets alongside the executable or under the installation's share directory.
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <system_error>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
@@ -240,9 +242,12 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         return false;
     }
 
-    // Each evaluation finishes on the GPU before returning (below), so the
-    // backend's mapped constant buffers and prior Vulkan image views are safe
-    // to update or replace on the next invocation.
+    // The backend writes this evaluation's constants into the ring slot of the evaluation
+    // kFramesInFlight earlier: that one must be done on the GPU. Ocarina keeps far fewer frames
+    // in flight, so this rarely waits.
+    static_assert(Fsr411::kFramesInFlight == std::tuple_size_v<decltype(linux_evaluation_ticks)>);
+    const size_t ring = static_cast<size_t>(linux_evaluations % Fsr411::kFramesInFlight);
+    scheduler.Wait(linux_evaluation_ticks[ring]);
 
     const bool resized = !output_image || in.render_size.width != render_extent.width ||
                          in.render_size.height != render_extent.height ||
@@ -256,29 +261,38 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         CreateOutput(in.upscale_size);
     }
 
-    // Cache input views, recreating them only when Lichii swaps the underlying
-    // images. The preceding frame's completed GPU wait protects old views.
-    const auto view_for = [this](LinuxInputView& cache, const Image& input) {
-        if (cache.image != input.image || cache.format != input.format || !cache.view) {
-            cache.view = {};
-            cache.view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
-                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
+    const auto view_for = [&](const Image& input) {
+        const auto& r = input.range;
+        auto it = std::ranges::find_if(linux_views, [&](const LinuxInputView& cached) {
+            const auto& c = cached.range;
+            return cached.image == input.image && cached.format == input.format &&
+                   c.aspectMask == r.aspectMask && c.baseMipLevel == r.baseMipLevel &&
+                   c.levelCount == r.levelCount && c.baseArrayLayer == r.baseArrayLayer &&
+                   c.layerCount == r.layerCount;
+        });
+        if (it == linux_views.end()) {
+            it = linux_views.insert(linux_views.end(), LinuxInputView{
                 .image = input.image,
-                .viewType = VK_IMAGE_VIEW_TYPE_2D,
                 .format = input.format,
-                .components{},
-                .subresourceRange = input.range,
+                .range = r,
+                .view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .image = input.image,
+                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                    .format = input.format,
+                    .components{},
+                    .subresourceRange = r,
+                }),
             });
-            cache.image = input.image;
-            cache.format = input.format;
         }
-        return *cache.view;
+        it->evaluation = linux_evaluations;
+        return *it->view;
     };
-    const VkImageView color = view_for(linux_color, in.color);
-    const VkImageView depth = view_for(linux_depth, in.depth);
-    const VkImageView motion = view_for(linux_motion, in.motion_vectors);
+    const VkImageView color = view_for(in.color);
+    const VkImageView depth = view_for(in.depth);
+    const VkImageView motion = view_for(in.motion_vectors);
 
     // The bundled prepass dilates motion from the minimum depth in its neighborhood.
     // Ocarina already supplies standard depth (near = 0), so do not reverse it.
@@ -328,10 +342,25 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
         command.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, {}, {}, after);
     });
-    // Until the mapped UBO ring can use Lichii's GPU-tick lifetime, wait for
-    // this frame. It also makes a Record() failure visible to the caller in
-    // this same frame so FSR 3.1 can produce a valid fallback output.
-    scheduler.Finish();
+    // The tick of the command buffer that holds this evaluation (Record() never submits).
+    const u64 tick = scheduler.CurrentTick();
+    linux_evaluation_ticks[ring] = tick;
+    for (auto& cached : linux_views) {
+        if (cached.evaluation == linux_evaluations) {
+            cached.tick = tick;
+        }
+    }
+    ++linux_evaluations;
+    // Views of images no recent evaluation used (a recreated frame slot), once the GPU is done.
+    std::erase_if(linux_views, [&](const LinuxInputView& cached) {
+        return cached.evaluation + 16 < linux_evaluations && scheduler.IsFree(cached.tick);
+    });
+    if (resized) {
+        // The backend builds its pipelines and resources in this first Record(): wait, so a
+        // failure there is seen in this frame and FSR 3.1 draws it. Later evaluations at the
+        // same sizes cannot fail (Fsr411::Upscaler::Record only fails on sizes and creation).
+        scheduler.Finish();
+    }
     return !failed.load();
 }
 
