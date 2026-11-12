@@ -58,9 +58,8 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
   game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
-  through this and the previous frame's camera (vertex constant buffer 3). NVIDIA DLSS keeps the
-  original replay of one recognized Link draw (`28c6e527634f814a`, 9702 indices, 16-ULP depth
-  check). With FSR, every opaque draw that
+  through this and the previous frame's camera (vertex constant buffer 3). For FSR and NVIDIA
+  DLSS alike, every opaque draw that
   meets the game's skinning contract is replayed with this and the previous frame's bones where
   its depth matches: indexed triangles, one instance, no blend or alpha test, depth-tested into
   the scene, camera constant buffer 3, actor constant buffer 4 (influence count 1-8 and the actor

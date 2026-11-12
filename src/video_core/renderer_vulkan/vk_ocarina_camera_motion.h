@@ -5,7 +5,6 @@
 
 #include <array>
 #include <memory>
-#include <vector>
 
 #include "common/common_types.h"
 #include "video_core/ocarina_actor_motion.h"
@@ -24,16 +23,6 @@ class StagingBufferPool;
 /// The temporal upscaler Ocarina uses this session: the settings, EDEN_NX2_DLSS_REPLACEMENT,
 /// DLSS availability, and native when FSR 3.1 is unsupported on the device.
 [[nodiscard]] VideoCommon::OcarinaUpscaleBackend ResolveOcarinaUpscaler(const Device& device);
-
-/// NVIDIA DLSS only: upstream's single Link mesh (FSR uses VideoCommon::OcarinaActorMotion).
-struct OcarinaActorMesh {
-    std::vector<u8> vertices;
-    std::vector<u16> indices;
-    std::array<f32, 4> current_origin;
-    std::array<f32, 4> previous_origin;
-    std::array<f32, 280 * 12> current_bones;
-    std::array<f32, 280 * 12> previous_bones;
-};
 
 class OcarinaUpscaler {
 public:
@@ -58,12 +47,10 @@ public:
 
     /// Queue motion, temporal evaluation and guest writeback for one frame. A false return leaves
     /// the guest dispatch in charge. The scheduler checks EvaluationFailed before skipping it.
-    /// NVIDIA DLSS replays dlss_mesh; FSR replays motion.
     bool Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                 VkExtent2D output_extent, VkExtent2D target_extent, const std::array<f32, 16>& current,
                 const std::array<f32, 16>& previous, const VideoCommon::OcarinaActorMotion& motion,
-                const OcarinaActorMesh& dlss_mesh, VkImage depth_image, u64 frame,
-                std::array<f32, 2> jitter = {});
+                VkImage depth_image, u64 frame, std::array<f32, 2> jitter = {});
 
 private:
     struct Impl;

@@ -30,8 +30,6 @@
 #include "video_core/host_shaders/ocarina_camera_motion_comp_spv.h"
 #include "video_core/host_shaders/ocarina_actor_motion_frag_spv.h"
 #include "video_core/host_shaders/ocarina_actor_motion_vert_spv.h"
-#include "video_core/host_shaders/ocarina_dlss_actor_motion_frag_spv.h"
-#include "video_core/host_shaders/ocarina_dlss_actor_motion_vert_spv.h"
 #include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -507,265 +505,17 @@ private:
     vk::Pipeline pipeline;
 };
 
-/// NVIDIA DLSS only: upstream's transforms for its single Link mesh (ocarina_dlss_actor_motion).
-struct DlssActorTransforms {
-    std::array<f32, 16> current;
-    std::array<f32, 16> previous;
-    std::array<f32, 4> current_origin;
-    std::array<f32, 4> previous_origin;
-    std::array<f32, 2> extent;
-    std::array<f32, 2> jitter; ///< the scene's viewport offset this frame (render pixels)
-};
-
-vk::Buffer UploadDlssActorData(MemoryAllocator& allocator, std::span<const std::byte> data,
-                               VkBufferUsageFlags usage) {
-    return UploadActorData(allocator, data, usage, data.size());
-}
-
-/// NVIDIA DLSS only: upstream's replay of Link's mesh, unchanged. FSR uses ActorOverlay.
-class DlssActorOverlay {
-public:
-    DlssActorOverlay(const Device& device, MemoryAllocator& allocator, const OcarinaActorMesh& mesh,
-                     const DlssActorTransforms& transforms, VkImageView depth_view,
-                     VkSampler sampler, VkImageView motion_view, VkExtent2D extent_)
-        : extent{extent_}, jitter{transforms.jitter},
-          index_count{static_cast<u32>(mesh.indices.size())}, vertex_bytes{mesh.vertices.size()},
-          vertices{UploadDlssActorData(allocator, std::as_bytes(std::span{mesh.vertices}),
-                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)},
-          indices{UploadDlssActorData(allocator, std::as_bytes(std::span{mesh.indices}),
-                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT)},
-          current{UploadDlssActorData(allocator, std::as_bytes(std::span{mesh.current_bones}),
-                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)},
-          previous{UploadDlssActorData(allocator, std::as_bytes(std::span{mesh.previous_bones}),
-                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)},
-          uniform{UploadDlssActorData(allocator, std::as_bytes(std::span{&transforms, 1}),
-                                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)} {
-        const auto& logical = device.GetLogical();
-        const std::array bindings{
-            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT},
-            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT},
-            VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-                                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
-            VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-                                         VK_SHADER_STAGE_FRAGMENT_BIT},
-        };
-        set_layout = logical.CreateDescriptorSetLayout({
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .bindingCount = static_cast<u32>(bindings.size()), .pBindings = bindings.data(),
-        });
-        const std::array sizes{
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
-        };
-        descriptor_pool = logical.CreateDescriptorPool({
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            .maxSets = 1, .poolSizeCount = static_cast<u32>(sizes.size()), .pPoolSizes = sizes.data(),
-        });
-        const VkDescriptorSetLayout raw_layout = *set_layout;
-        sets = descriptor_pool.Allocate({
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = *descriptor_pool, .descriptorSetCount = 1, .pSetLayouts = &raw_layout,
-        });
-        const VkDescriptorSet set = sets[0];
-        const std::array buffers{
-            VkDescriptorBufferInfo{*current, 0, VK_WHOLE_SIZE},
-            VkDescriptorBufferInfo{*previous, 0, VK_WHOLE_SIZE},
-            VkDescriptorBufferInfo{*uniform, 0, VK_WHOLE_SIZE},
-        };
-        const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
-        const std::array writes{
-            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[0]},
-            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 1, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffers[1]},
-            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 2, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buffers[2]},
-            VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 3, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depth},
-        };
-        logical.UpdateDescriptorSets(writes, {});
-        const VkPushConstantRange depth_range{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32)};
-        layout = logical.CreatePipelineLayout({
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 1, .pSetLayouts = &raw_layout,
-            .pushConstantRangeCount = 1, .pPushConstantRanges = &depth_range,
-        });
-
-        const VkAttachmentDescription attachment{
-            .format = MOTION_FORMAT, .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        const VkAttachmentReference color{0, VK_IMAGE_LAYOUT_GENERAL};
-        const VkSubpassDescription subpass{
-            .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-            .colorAttachmentCount = 1, .pColorAttachments = &color,
-        };
-        render_pass = logical.CreateRenderPass({
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-            .attachmentCount = 1, .pAttachments = &attachment,
-            .subpassCount = 1, .pSubpasses = &subpass,
-        });
-        framebuffer = logical.CreateFramebuffer({
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = *render_pass, .attachmentCount = 1, .pAttachments = &motion_view,
-            .width = extent.width, .height = extent.height, .layers = 1,
-        });
-        pipeline = MakePipeline(logical);
-    }
-
-    /// Reuse the mesh and update the two poses only while the vertex and index data still match.
-    bool Update(const Device& device, const OcarinaActorMesh& mesh,
-                const DlssActorTransforms& transforms, VkImageView depth_view, VkSampler sampler) {
-        const auto vertex_data = std::as_bytes(std::span{mesh.vertices});
-        const auto index_data = std::as_bytes(std::span{mesh.indices});
-        if (vertex_data.size() != vertex_bytes || mesh.indices.size() != index_count) {
-            return false;
-        }
-        const auto upload = [](vk::Buffer& buffer, std::span<const std::byte> data) {
-            std::memcpy(buffer.Mapped().data(), data.data(), data.size());
-            buffer.Flush();
-        };
-        upload(vertices, vertex_data);
-        upload(indices, index_data);
-        upload(current, std::as_bytes(std::span{mesh.current_bones}));
-        upload(previous, std::as_bytes(std::span{mesh.previous_bones}));
-        upload(uniform, std::as_bytes(std::span{&transforms, 1}));
-        jitter = transforms.jitter;
-        const VkDescriptorImageInfo depth{sampler, depth_view, VK_IMAGE_LAYOUT_GENERAL};
-        const VkWriteDescriptorSet write{
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sets[0], 3, 0, 1,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depth,
-        };
-        device.GetLogical().UpdateDescriptorSets(write, {});
-        return true;
-    }
-
-    void Draw(vk::CommandBuffer cmd) const {
-        cmd.BeginRenderPass({
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = *render_pass,
-            .framebuffer = *framebuffer,
-            .renderArea = {{0, 0}, extent},
-        }, VK_SUBPASS_CONTENTS_INLINE);
-        cmd.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
-        cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *layout, 0, sets[0], {});
-        // Offset like the game's jittered draws, so the replay rasterizes the same samples and its
-        // depth matches the scene depth (unjittered, the depth test below dropped most of Link).
-        const VkViewport viewport{jitter[0], static_cast<f32>(extent.height) + jitter[1],
-                                  static_cast<f32>(extent.width), -static_cast<f32>(extent.height),
-                                  0, 1};
-        cmd.SetViewport(0, viewport);
-        // Depth matches in the captured replay leveled off at this tolerance.
-        constexpr u32 depth_tolerance = 16;
-        cmd.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT, depth_tolerance);
-        cmd.BindVertexBuffer(0, *vertices, 0);
-        cmd.BindIndexBuffer(*indices, 0, VK_INDEX_TYPE_UINT16);
-        cmd.DrawIndexed(index_count, 1, 0, 0, 0);
-        cmd.EndRenderPass();
-    }
-
-private:
-    vk::Pipeline MakePipeline(const vk::Device& logical) const {
-        const auto vertex = logical.CreateShaderModule({
-            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(OCARINA_DLSS_ACTOR_MOTION_VERT_SPV),
-            .pCode = std::data(OCARINA_DLSS_ACTOR_MOTION_VERT_SPV),
-        });
-        const auto fragment = logical.CreateShaderModule({
-            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(OCARINA_DLSS_ACTOR_MOTION_FRAG_SPV),
-            .pCode = std::data(OCARINA_DLSS_ACTOR_MOTION_FRAG_SPV),
-        });
-        const std::array stages{
-            VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                            nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, *vertex, "main"},
-            VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                            nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, *fragment, "main"},
-        };
-        const VkVertexInputBindingDescription binding{0, 48, VK_VERTEX_INPUT_RATE_VERTEX};
-        const std::array attributes{
-            VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
-            VkVertexInputAttributeDescription{4, 0, VK_FORMAT_R8G8B8A8_UNORM, 40},
-            VkVertexInputAttributeDescription{5, 0, VK_FORMAT_R8G8B8A8_UNORM, 44},
-            VkVertexInputAttributeDescription{6, 0, VK_FORMAT_R16G16B16A16_UINT, 12},
-            VkVertexInputAttributeDescription{7, 0, VK_FORMAT_R16G16B16A16_UINT, 20},
-        };
-        const VkPipelineVertexInputStateCreateInfo vertex_input{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-            .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
-            .vertexAttributeDescriptionCount = static_cast<u32>(attributes.size()),
-            .pVertexAttributeDescriptions = attributes.data(),
-        };
-        const VkPipelineInputAssemblyStateCreateInfo assembly{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        };
-        const VkRect2D scissor{{0, 0}, extent};
-        const VkPipelineViewportStateCreateInfo viewport_state{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-            .viewportCount = 1, .pViewports = nullptr, .scissorCount = 1, .pScissors = &scissor,
-        };
-        const VkDynamicState dynamic_viewport = VK_DYNAMIC_STATE_VIEWPORT; // Draw: + jitter
-        const VkPipelineDynamicStateCreateInfo dynamic{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            .dynamicStateCount = 1, .pDynamicStates = &dynamic_viewport,
-        };
-        const VkPipelineRasterizationStateCreateInfo raster{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-            .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE,
-            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1,
-        };
-        const VkPipelineMultisampleStateCreateInfo samples{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-        };
-        const VkPipelineColorBlendAttachmentState write{
-            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT,
-        };
-        const VkPipelineColorBlendStateCreateInfo blend{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-            .attachmentCount = 1, .pAttachments = &write,
-        };
-        return logical.CreateGraphicsPipeline({
-            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .stageCount = static_cast<u32>(stages.size()), .pStages = stages.data(),
-            .pVertexInputState = &vertex_input, .pInputAssemblyState = &assembly,
-            .pViewportState = &viewport_state, .pRasterizationState = &raster,
-            .pMultisampleState = &samples, .pColorBlendState = &blend, .pDynamicState = &dynamic,
-            .layout = *layout, .renderPass = *render_pass, .basePipelineIndex = -1,
-        });
-    }
-
-    VkExtent2D extent;
-    std::array<f32, 2> jitter; ///< DlssActorTransforms::jitter of the last upload
-    u32 index_count;
-    size_t vertex_bytes;
-    vk::Buffer vertices, indices, current, previous, uniform;
-    vk::DescriptorSetLayout set_layout;
-    vk::DescriptorPool descriptor_pool;
-    vk::DescriptorSets sets;
-    vk::PipelineLayout layout;
-    vk::RenderPass render_pass;
-    vk::Framebuffer framebuffer;
-    vk::Pipeline pipeline;
-};
-
 class CameraMotionPass final : public ComputePass {
 public:
     CameraMotionPass(const Device& device_, Scheduler& scheduler, DescriptorPool& pool)
         : ComputePass(device_, scheduler, pool, BINDINGS, TEMPLATES, BANK, PUSH_CONSTANTS,
                       OCARINA_CAMERA_MOTION_COMP_SPV) {}
 
-    /// Fill camera motion from depth, then overwrite visible actor pixels with skinned motion
-    /// (FSR's overlay, or NVIDIA DLSS's dlss_overlay).
+    /// Fill camera motion from depth, then overwrite visible actor pixels with skinned motion.
     void Record(Scheduler& scheduler, const void* descriptors,
                 const CameraMotionParameters& parameters, VkImage motion, VkExtent2D size,
-                const ActorOverlay* overlay, const DlssActorOverlay* dlss_overlay) {
-        scheduler.Record([this, descriptors, parameters, motion, size, overlay, dlss_overlay]
+                const ActorOverlay* overlay) {
+        scheduler.Record([this, descriptors, parameters, motion, size, overlay]
                          (vk::CommandBuffer cmdbuf) {
             const VkMemoryBarrier read_depth{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -802,8 +552,6 @@ public:
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, to_overlay);
             if (overlay) {
                 overlay->Draw(cmdbuf);
-            } else if (dlss_overlay) {
-                dlss_overlay->Draw(cmdbuf);
             }
         });
     }
@@ -1065,7 +813,6 @@ struct OcarinaFrameSlot {
     vk::Image color;
     vk::ImageView color_view;
     std::unique_ptr<ActorOverlay> overlay;
-    std::unique_ptr<DlssActorOverlay> dlss_overlay; ///< NVIDIA DLSS only
 };
 
 /// The scene before its glows and particles, the pixels they changed in the last two frames and
@@ -1148,13 +895,6 @@ struct OcarinaUpscaler::Impl {
 
     bool UsesFsr4() const {
         return fsr4 && !fsr4->Failed();
-    }
-    bool UsesDlss() const {
-#ifdef EGLANTINE_STREAMLINE
-        return dlss != nullptr;
-#else
-        return false;
-#endif
     }
 
     bool Failed() const {
@@ -1327,8 +1067,7 @@ VkImageView OcarinaUpscaler::CompositedView() const {
 bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
-                            const VideoCommon::OcarinaActorMotion& motion,
-                            const OcarinaActorMesh& dlss_mesh, VkImage depth_image, u64 frame,
+                            const VideoCommon::OcarinaActorMotion& motion, VkImage depth_image, u64 frame,
                             std::array<f32, 2> jitter) {
     auto& state = *impl;
     if (state.last_frame == frame || state.Failed()) {
@@ -1355,9 +1094,8 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         current, previous,
         {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, jitter,
     };
-    const bool dlss = state.UsesDlss();
     // Keep idle GPU storage when no actor has consecutive-frame pose history.
-    const bool has_actor_motion = !dlss && !motion.vertices.empty() && !motion.indices.empty() &&
+    const bool has_actor_motion = !motion.vertices.empty() && !motion.indices.empty() &&
         !motion.current_poses.empty() &&
         motion.current_poses.size() == motion.previous_poses.size() &&
         motion.indices.size() <= std::numeric_limits<u32>::max() &&
@@ -1373,23 +1111,6 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
                                       depth, sampler);
         }
     }
-    // NVIDIA DLSS: without Link's pose (dialogue, cutscenes, first person) the motion comes from
-    // the camera alone.
-    if (dlss) {
-        const DlssActorTransforms dlss_transforms{
-            current, previous, dlss_mesh.current_origin, dlss_mesh.previous_origin,
-            {static_cast<f32>(extent.width), static_cast<f32>(extent.height)}, jitter,
-        };
-        if (dlss_mesh.indices.empty()) {
-            resources.dlss_overlay.reset();
-        } else if (!resources.dlss_overlay ||
-                   !resources.dlss_overlay->Update(state.device, dlss_mesh, dlss_transforms,
-                                                   depth, sampler)) {
-            resources.dlss_overlay = std::make_unique<DlssActorOverlay>(
-                state.device, state.allocator, dlss_mesh, dlss_transforms, depth, sampler,
-                *resources.motion_view, extent);
-        }
-    }
 
     state.scheduler.RequestOutsideRenderPassOperationContext();
     state.queue.Acquire(state.scheduler, 2);
@@ -1398,8 +1119,7 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     resources.tick = state.scheduler.CurrentTick();
     state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), {*transform, jitter},
                              *resources.motion, extent,
-                             has_actor_motion ? resources.overlay.get() : nullptr,
-                             dlss ? resources.dlss_overlay.get() : nullptr);
+                             has_actor_motion ? resources.overlay.get() : nullptr);
     state.queue.Acquire(state.scheduler, 2);
     state.queue.AddSampledImage(color, sampler);
     state.queue.AddImage(*resources.color_view);

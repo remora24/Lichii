@@ -43,8 +43,8 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
   1440p mode at 1440p instead of reconstructing to 4K (texture LOD bias -1 instead of -1.58);
   explicit modes apply only when the game's sizes have AMD's ratio for them and otherwise fall
   back to Automatic with a log line.
-- Keep NVIDIA DLSS's Ocarina actor replay as before (one Link draw, 16-ULP depth check); the
-  actor-motion fixes above apply to FSR only.
+- Apply the Ocarina actor-motion fixes above to NVIDIA DLSS too: it now replays every captured
+  actor with the 512-ULP depth check instead of one Link draw at 16 ULP. Untested on NVIDIA.
 - Enable the native Linux FSR 4.1.2 Vulkan features (compute derivatives, integer dot product)
   only on AMD with FSR 4.1.2 turned on; other GPUs, builds and settings keep the original device
   feature chain and no longer log a removed-extension warning.
