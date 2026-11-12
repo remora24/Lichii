@@ -58,7 +58,9 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
   game's pass there (DLAA through it is untested).
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
-  through this and the previous frame's camera (vertex constant buffer 3). Every opaque draw that
+  through this and the previous frame's camera (vertex constant buffer 3). NVIDIA DLSS keeps the
+  original replay of one recognized Link draw (`28c6e527634f814a`, 9702 indices, 16-ULP depth
+  check). With FSR, every opaque draw that
   meets the game's skinning contract is replayed with this and the previous frame's bones where
   its depth matches: indexed triangles, one instance, no blend or alpha test, depth-tested into
   the scene, camera constant buffer 3, actor constant buffer 4 (influence count 1-8 and the actor
@@ -105,7 +107,8 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   and its motion is taken from the unjittered position. Without that offset the jitter made the
   check fail on most of the fragments it otherwise accepts.
 - Texture LOD bias (FSR only): when the session's upscaler is FSR, mipmapped samplers get
-  AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode (none in handheld).
+  AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode, or -1 with the FSR
+  output resolution set to Native AA (none in handheld).
   Samplers pick the biased or unbiased variant at each bind, so a console mode switch takes
   effect in-session. Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep
   the game's own bias.
@@ -132,6 +135,18 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   It passes Ocarina's standard [0,1] depth directly to the bundled prepass. That shader selects
   the minimum neighboring depth when choosing motion vectors; reversing depth would select
   background motion at foreground boundaries and corrupt history reprojection.
+  Its extra Vulkan features (`VK_KHR_compute_shader_derivatives`, `shaderIntegerDotProduct`) are
+  queried and enabled only in this build, on AMD, with FSR 4.1.2 turned on (the checkbox or
+  `LICHII_FSR412_EXPERIMENTAL=1`); every other device and build keeps the original feature chain.
+- FSR output resolution (`fsr_quality`, not on Windows), shown while either FSR checkbox is on,
+  mirrors NVIDIA DLSS's quality setting. Automatic keeps the game's sizes. Native AA outputs at
+  the render size: Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K, and the
+  4K presentation composite is skipped. Quality, Balanced, Performance and Ultra Performance
+  (AMD's 1.5, 1.7, 2.0 and 3.0 ratios) only apply when the game's render and output sizes have
+  that ratio; otherwise Automatic is used and the fallback is logged once. FSR can't change the
+  game's render size, so in Ocarina docked only Quality (1440p -> 4K) fits. The same choice applies
+  to FSR 3.1 standing in for other games' DLSS while an FSR checkbox is on. It takes effect when a
+  game starts.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
   (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
   reactive and transparency/composition masks; missing capture uses zero masks, not stale

@@ -50,6 +50,7 @@ SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
 SWITCHABLE(NvidiaDlssPreset, false);
+SWITCHABLE(FsrQuality, false);
 SWITCHABLE(HdrMode, false);
 SWITCHABLE(HdrSwapchain, false);
 SWITCHABLE(AspectRatio, true);
@@ -104,6 +105,15 @@ NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings() {
     const u32 options = nvidia_dlss_runtime_options.load(std::memory_order_relaxed);
     return {static_cast<NvidiaDlssQuality>(options & 0xff),
             static_cast<NvidiaDlssPreset>((options >> 8) & 0xff)};
+}
+
+FsrQuality GetFsrQuality() {
+#ifdef _WIN32
+    return FsrQuality::Automatic;
+#else
+    return values.ocarina_fsr.GetValue() || values.amd_fsr4.GetValue() ? values.fsr_quality.GetValue()
+                                                                         : FsrQuality::Automatic;
+#endif
 }
 
 std::string GetTimeZoneString(TimeZone time_zone) {

@@ -73,6 +73,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/memory_manager.h"
+#include "video_core/fsr_mode.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_fast_draw.h"
@@ -3044,10 +3045,113 @@ void RasterizerVulkan::BeginOcarinaActorFrame() {
     oot_actor_duplicates = 0;
 }
 
+/// NVIDIA DLSS: capture the skinning pose of the recognized Link draw for frame-to-frame motion.
+void RasterizerVulkan::TrackOcarinaDlssActor(u64 shader_hash, bool is_indexed, bool is_indirect) {
+    if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect ||
+        !OcarinaTemporalEnabled() || oot_actor.frame == render_trace_frame) {
+        return;
+    }
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const auto& regs = maxwell3d->regs;
+    const auto& stream = regs.vertex_streams[0];
+    if (draw.index_buffer.count != 9702 || draw.index_buffer.FormatSizeInBytes() != 2 ||
+        !stream.IsEnabled() || stream.stride != 48 || regs.vertex_stream_instances.IsInstancingEnabled(0)) {
+        return;
+    }
+    const auto attribute = [&](u32 location, VkFormat format, u32 offset) {
+        const auto& attrib = regs.vertex_attrib_format[location];
+        return attrib.buffer == 0 && !attrib.constant && attrib.offset == offset &&
+            MaxwellToVK::VertexFormat(device, attrib.type, attrib.size) == format;
+    };
+    if (!attribute(0, VK_FORMAT_R32G32B32_SFLOAT, 0) ||
+        !attribute(4, VK_FORMAT_R8G8B8A8_UNORM, 40) || !attribute(5, VK_FORMAT_R8G8B8A8_UNORM, 44) ||
+        !attribute(6, VK_FORMAT_R16G16B16A16_UINT, 12) || !attribute(7, VK_FORMAT_R16G16B16A16_UINT, 20)) {
+        return;
+    }
+
+    OcarinaActorPose pose{
+        .frame = render_trace_frame,
+        .channel = gpu_memory,
+        .vertex = stream.Address(),
+        .indices = draw.index_buffer.IndexStart(),
+        .base_vertex = static_cast<s32>(draw.base_index),
+    };
+    bool origin_found{}, bones_found{};
+    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
+                                                const auto& binding, u32 size, const auto*, u32) {
+        if (stage != 0 || storage || (index != 4 && index != 6) ||
+            buffer_cache.IsRegionGpuModified(binding.device_addr, size)) {
+            return;
+        }
+        if (index == 4 && size >= 0x40 + 3 * sizeof(f32)) {
+            device_memory.ReadBlockUnsafe(binding.device_addr + 0x40, pose.origin.data(), 3 * sizeof(f32));
+            origin_found = true;
+        }
+        if (index == 6 && size == 13568) {
+            device_memory.ReadBlockUnsafe(binding.device_addr, pose.bones.data(), sizeof(pose.bones));
+            bones_found = true;
+        }
+    });
+    if (origin_found && bones_found) {
+        oot_previous_actor = oot_actor;
+        oot_actor = pose;
+    }
+}
+
+/// NVIDIA DLSS: read the shared mesh only when both poses refer to the same vertex and index
+/// buffers.
+void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
+    const auto& now = oot_actor;
+    const auto& before = oot_previous_actor;
+    if (now.frame != render_trace_frame || before.frame + 1 != now.frame ||
+        now.channel != gpu_memory || before.channel != now.channel || now.vertex != before.vertex ||
+        now.indices != before.indices || now.base_vertex != before.base_vertex) {
+        return;
+    }
+    const auto read = [&](GPUVAddr address, void* dst, size_t size) {
+        if (!gpu_memory->IsContinuousRange(address, size) ||
+            !gpu_memory->IsFullyMappedRange(address, size)) {
+            return false;
+        }
+        const auto device_address = gpu_memory->GpuToCpuAddress(address);
+        if (!device_address || buffer_cache.IsRegionGpuModified(*device_address, size) ||
+            gpu.HasPendingCPUWrites(*device_address, size)) {
+            return false;
+        }
+        gpu_memory->ReadBlockUnsafe(address, dst, size);
+        return true;
+    };
+    constexpr size_t index_count = 9702;
+    constexpr size_t stride = 48;
+    std::vector<u16> indices(index_count);
+    if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
+        return;
+    }
+    const auto [minimum, maximum] = std::ranges::minmax(indices);
+    const s64 first = static_cast<s64>(now.base_vertex) + minimum;
+    const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
+    if (first < 0 || first > (1 << 20) || vertex_count > 16384) {
+        return;
+    }
+    std::vector<u8> vertices(vertex_count * stride);
+    if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
+        return;
+    }
+    for (u16& index : indices) {
+        index -= minimum;
+    }
+
+    mesh = {std::move(vertices), std::move(indices), now.origin, before.origin, now.bones, before.bones};
+}
+
 /// Collect the opaque skinning contract, independently of the material's shader variant.
 void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect,
                                         u32 instance_count) {
     if (!OcarinaTemporalEnabled()) {
+        return;
+    }
+    if (oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss) {
+        TrackOcarinaDlssActor(shader_hash, is_indexed, is_indirect);
         return;
     }
     using Rejection = OcarinaActorRejection;
@@ -3535,9 +3639,15 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
     if ((!replace && pipeline.ShaderHash() != depth_reader) || !OcarinaTemporalEnabled()) {
         return false;
     }
+    // Native AA keeps the render size (Ocarina's 1440p mode stays at 1440p): NVIDIA DLSS's quality
+    // setting, or the FSR output resolution for FSR.
+    const auto fsr_quality = oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr
+                                 ? Settings::GetFsrQuality()
+                                 : Settings::FsrQuality::Automatic;
     const bool native_resolution =
-        oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss &&
-        Settings::GetNvidiaDlssRuntimeSettings().quality == Settings::NvidiaDlssQuality::Native;
+        (oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss &&
+         Settings::GetNvidiaDlssRuntimeSettings().quality == Settings::NvidiaDlssQuality::Native) ||
+        fsr_quality == Settings::FsrQuality::Native;
     const bool upscale_4k = pass_1440p && !native_resolution;
     const auto read_tic = [this](u32 index) -> std::optional<Tegra::Texture::TICEntry> {
         const auto& table = kepler_compute->regs.tic;
@@ -3645,7 +3755,12 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format != output_format) {
         return fail("unsupported storage format");
     }
-    {
+    // NVIDIA DLSS keeps upstream's single Link mesh: without Link's pose the mesh stays empty and
+    // the motion comes from the camera alone. FSR replays every captured actor.
+    OcarinaActorMesh dlss_mesh{};
+    if (oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss) {
+        ReadOcarinaActor(dlss_mesh);
+    } else {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaActorAssembly};
         ReadOcarinaActors();
     }
@@ -3671,12 +3786,22 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         const VkExtent2D output_extent = native_resolution ? extent
                                          : upscale_4k      ? VkExtent2D{3840, 2160}
                                                            : target_extent;
+        if (static bool logged{};
+            !logged && VideoCommon::FsrMode::Select(fsr_quality, {extent.width, extent.height},
+                                                    {output_extent.width, output_extent.height}) !=
+                           fsr_quality) {
+            logged = true;
+            LOG_INFO(Render_Vulkan,
+                     "FSR output resolution {} doesn't fit {}x{} -> {}x{}; using Automatic",
+                     Settings::CanonicalizeEnum(fsr_quality), extent.width, extent.height,
+                     output_extent.width, output_extent.height);
+        }
         bool recorded;
         {
             VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::OcarinaUpscale};
             recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view, extent,
                                              output_extent, target_extent, oot_motion.current,
-                                             oot_motion.previous, oot_actor_motion,
+                                             oot_motion.previous, oot_actor_motion, dlss_mesh,
                                              depth.ImageHandle(), render_trace_frame, jitter);
         }
         if (!recorded) {

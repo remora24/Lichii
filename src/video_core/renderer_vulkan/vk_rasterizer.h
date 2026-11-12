@@ -268,6 +268,9 @@ private:
     bool TryOcarinaUpscale(const ComputePipeline& pipeline, bool replace);
     void ReadOcarinaActors();
     void BeginOcarinaActorFrame();
+    /// NVIDIA DLSS keeps upstream's single Link mesh (FSR uses the actor history above).
+    void TrackOcarinaDlssActor(u64 shader_hash, bool is_indexed, bool is_indirect);
+    void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
 
@@ -329,6 +332,16 @@ private:
     std::optional<u64> oot_effects_frame;
     GPUVAddr oot_effects_address{};
     VkImageView oot_effects_scene{};
+    /// NVIDIA DLSS only: upstream's Link pose (TrackOcarinaDlssActor).
+    struct OcarinaActorPose {
+        u64 frame{};
+        const Tegra::MemoryManager* channel{};
+        GPUVAddr vertex{};
+        GPUVAddr indices{};
+        s32 base_vertex{};
+        std::array<f32, 4> origin{};
+        std::array<f32, 280 * 12> bones{};
+    } oot_actor, oot_previous_actor;
     VideoCommon::OcarinaActorHistory oot_actor_history;
     VideoCommon::OcarinaActorMotion oot_actor_motion;
     struct OcarinaActorPart {

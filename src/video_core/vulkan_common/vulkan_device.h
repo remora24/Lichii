@@ -51,7 +51,6 @@ VK_DEFINE_HANDLE(VmaPool)
             shader_demote_to_helper_invocation)                                                    \
     FEATURE(EXT, SubgroupSizeControl, SUBGROUP_SIZE_CONTROL, subgroup_size_control)                \
     FEATURE(KHR, Maintenance4, MAINTENANCE_4, maintenance4)                                        \
-    FEATURE(KHR, ShaderIntegerDotProduct, SHADER_INTEGER_DOT_PRODUCT, shader_integer_dot_product) \
     FEATURE(KHR, Synchronization2, SYNCHRONIZATION_2, synchronization2)
 
 #define FOR_EACH_VK_FEATURE_1_4(FEATURE)
@@ -78,7 +77,6 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, ShaderFloat8, SHADER_FLOAT8, shader_float8)                                       \
     FEATURE(EXT, TransformFeedback, TRANSFORM_FEEDBACK, transform_feedback)                        \
     FEATURE(EXT, VertexInputDynamicState, VERTEX_INPUT_DYNAMIC_STATE, vertex_input_dynamic_state)  \
-    FEATURE(KHR, ComputeShaderDerivatives, COMPUTE_SHADER_DERIVATIVES, compute_shader_derivatives)  \
     FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                        \
     FEATURE(KHR, Maintenance5, MAINTENANCE_5, maintenance5)                                        \
     FEATURE(KHR, Maintenance6, MAINTENANCE_6, maintenance6)                                        \
@@ -528,16 +526,18 @@ FN_MAX_LIMIT_LIST
         return features.shader_float16_int8.shaderInt8;
     }
 
-    /// Required by the BeamNG-derived native FSR 4.1.2 INT8 shaders.
-    /// When requested by the Linux adapter, report individual capability gates
-    /// rather than silently falling back to FSR 3.1.
+    /// Required by the BeamNG-derived native FSR 4.1.2 INT8 shaders. Only queried and enabled
+    /// when the Linux FSR 4.1.2 build runs on AMD with FSR 4.1.2 requested; every other device
+    /// keeps the upstream feature chain. Reports individual capability gates on request rather
+    /// than silently falling back to FSR 3.1.
     bool IsNativeFsr412Supported(bool log_details = false) const {
-        const bool derivatives = extensions.compute_shader_derivatives;
+        const bool derivatives = native_fsr412_derivatives_extension;
         const bool derivative_quads =
-            features.compute_shader_derivatives.computeDerivativeGroupQuads != VK_FALSE;
+            native_fsr412_derivatives.computeDerivativeGroupQuads != VK_FALSE;
         const bool shader_int8 = features.shader_float16_int8.shaderInt8 != VK_FALSE;
         const bool shader_int16 = features.features.shaderInt16 != VK_FALSE;
-        const bool integer_dot_product = native_fsr412_integer_dot_product;
+        const bool integer_dot_product =
+            native_fsr412_integer_dot_product.shaderIntegerDotProduct != VK_FALSE;
         const bool supported = derivatives && derivative_quads && shader_int8 && shader_int16 &&
                                integer_dot_product;
         if (log_details) {
@@ -1402,10 +1402,12 @@ private:
     Features features{};
     Properties properties{};
 
-    // Individual feature structures are linked through features2.pNext and
-    // retained through vkCreateDevice, including shaderIntegerDotProduct.
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};
+    /// Linux FSR 4.1.2 only (WantsNativeFsr412); never chained for other devices or builds.
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR native_fsr412_derivatives{};
+    VkPhysicalDeviceShaderIntegerDotProductFeatures native_fsr412_integer_dot_product{};
+    bool native_fsr412_derivatives_extension{};
     VkPhysicalDeviceProperties2 properties2{};
 
     // Misc features
@@ -1427,7 +1429,6 @@ private:
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.
-    bool native_fsr412_integer_dot_product{}; ///< Vulkan 1.3 shaderIntegerDotProduct.
     bool supports_d24_depth{};                 ///< Supports D24 depth buffers.
     bool must_emulate_scaled_formats{};        ///< Requires scaled vertex format emulation
     bool dynamic_state3_blending{};            ///< Has blending features of dynamic_state3.

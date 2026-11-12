@@ -499,6 +499,21 @@ bool WantsAmdFsr4(VkDriverId driver_id) {
     return false;
 #endif
 }
+
+/// The Linux FSR 4.1.2 build's community backend runs only on AMD and only when FSR 4.1.2 is
+/// requested (Fsr4Upscaler::IsWanted). Its extra device features stay off for everyone else.
+bool WantsNativeFsr412([[maybe_unused]] u32 vendor_id) {
+#if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
+    if (vendor_id != 0x1002) {
+        return false;
+    }
+    const char* const env = std::getenv("LICHII_FSR412_EXPERIMENTAL");
+    return Settings::values.amd_fsr4.GetValue() ||
+           (env != nullptr && env[0] == '1' && env[1] == '\0');
+#else
+    return false;
+#endif
+}
 } // Anonymous namespace
 
 Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR surface,
@@ -1230,8 +1245,10 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;
 
-    // The per-feature pNext chain is also passed to vkCreateDevice. In particular,
-    // shaderIntegerDotProduct must be queried and enabled for native FSR 4.
+    // Configure properties.
+    VkPhysicalDeviceVulkan12Features features_1_2{};
+    VkPhysicalDeviceVulkan13Features features_1_3{};
+
     // Configure properties.
     properties.properties = physical.GetProperties();
 
@@ -1346,6 +1363,16 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Set next pointer.
     void** next = &features2.pNext;
 
+    // Vulkan 1.2 and 1.3 features
+    if (instance_version >= VK_API_VERSION_1_2) {
+        features_1_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        features_1_3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
+        features_1_2.pNext = &features_1_3;
+
+        *next = &features_1_2;
+    }
+
 // Test all features we know about. If the feature is not available in core at our
 // current API version, and was not enabled by an extension, skip testing the feature.
 // We set the structure sType explicitly here as it is zeroed by the constructor.
@@ -1384,6 +1411,26 @@ bool Device::GetSuitability(bool requires_swapchain) {
         SetNext(next, device_fault_features);
     }
 
+    // Linux FSR 4.1.2: compute derivatives and integer dot products, chained only when wanted.
+    native_fsr412_derivatives_extension = false;
+    bool native_fsr412_dot_product = false;
+    if (WantsNativeFsr412(properties.properties.vendorID)) {
+        if (supported_extensions.contains(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+            native_fsr412_derivatives.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+            SetNext(next, native_fsr412_derivatives);
+            native_fsr412_derivatives_extension = true;
+        }
+        native_fsr412_dot_product =
+            instance_version >= VK_API_VERSION_1_3 ||
+            supported_extensions.contains(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+        if (native_fsr412_dot_product) {
+            native_fsr412_integer_dot_product.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+            SetNext(next, native_fsr412_integer_dot_product);
+        }
+    }
+
     // Perform the feature test.
     physical.GetFeatures2(features2);
 
@@ -1391,13 +1438,16 @@ bool Device::GetSuitability(bool requires_swapchain) {
         loaded_extensions.insert(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         device_fault_features.deviceFaultVendorBinary = VK_FALSE;
     }
+    // A chained extension structure needs its extension enabled at device creation.
+    if (native_fsr412_derivatives_extension) {
+        loaded_extensions.insert(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    }
+    if (native_fsr412_dot_product && instance_version < VK_API_VERSION_1_3) {
+        loaded_extensions.insert(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+    }
 
     // Base Vulkan 1.0 features are always valid regardless of instance version.
     features.features = features2.features;
-    // The individual Vulkan 1.3 (or VK_KHR_shader_integer_dot_product) feature
-    // is populated by GetFeatures2 and stays enabled through vkCreateDevice.
-    native_fsr412_integer_dot_product =
-        features.shader_integer_dot_product.shaderIntegerDotProduct != VK_FALSE;
 
 // Some features are mandatory. Check those.
 #define CHECK_FEATURE(feature, name)                                                               \
@@ -1896,20 +1946,6 @@ void Device::RemoveUnsuitableExtensions() {
         !properties.pipeline_binary.pipelineBinaryPrefersInternalCache && !DriverCachesPipelines();
     RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
                                        VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
-
-    // In the opt-in Linux build, expose derivative features on AMD devices
-    // at device creation so that the graphics checkbox can be toggled before
-    // launching a game. The ordinary build never enables this extension.
-    bool want_native_fsr412 = false;
-#ifdef LICHII_LINUX_FSR412_BEAMNG
-    want_native_fsr412 = properties.properties.vendorID == 0x1002;
-#endif
-    extensions.compute_shader_derivatives =
-        extensions.compute_shader_derivatives && want_native_fsr412 &&
-        features.compute_shader_derivatives.computeDerivativeGroupQuads;
-    RemoveExtensionFeatureIfUnsuitable(extensions.compute_shader_derivatives,
-                                       features.compute_shader_derivatives,
-                                       VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
 
     // VK_EXT_shader_float8, only for AMD FSR 4: its RDNA 4 network runs in FP8 and drew a black
     // picture without the feature on the device (found by CheezerWheezer).
