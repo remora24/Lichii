@@ -37,6 +37,17 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
   by keeping each skinned mesh's decoded geometry and reusing it while the guest bytes are
   unchanged (they are compared every frame). `EDEN_NX2_GPU_PROFILE` reports the capture's
   checks, pose, geometry and assembly time and the Ocarina upscale as separate zones.
+- Add "FSR output resolution" (Linux and other non-Windows builds), shown while an FSR checkbox
+  is on and mirroring NVIDIA DLSS's quality setting: Automatic (default, unchanged behaviour),
+  Native AA, Quality, Balanced, Performance and Ultra Performance. Native AA keeps Ocarina's
+  1440p mode at 1440p instead of reconstructing to 4K (texture LOD bias -1 instead of -1.58);
+  explicit modes apply only when the game's sizes have AMD's ratio for them and otherwise fall
+  back to Automatic with a log line.
+- Keep NVIDIA DLSS's Ocarina actor replay as before (one Link draw, 16-ULP depth check); the
+  actor-motion fixes above apply to FSR only.
+- Enable the native Linux FSR 4.1.2 Vulkan features (compute derivatives, integer dot product)
+  only on AMD with FSR 4.1.2 turned on; other GPUs, builds and settings keep the original device
+  feature chain and no longer log a removed-extension warning.
 
 ## [0.1.0]
 

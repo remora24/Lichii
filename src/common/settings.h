@@ -444,6 +444,9 @@ struct Values {
     SwitchableSetting<bool> ocarina_fsr{linkage, false, "ocarina_fsr", Category::Renderer};
     // AMD FSR 4 in place of FSR 3.1 where FSR replaces a game's upscaler (Windows, AMD's driver).
     SwitchableSetting<bool> amd_fsr4{linkage, false, "amd_fsr4", Category::Renderer};
+    // FSR's output resolution, like nvidia_dlss_quality (not on Windows; GetFsrQuality).
+    SwitchableSetting<FsrQuality> fsr_quality{linkage, FsrQuality::Automatic, "fsr_quality",
+                                              Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -1099,6 +1102,10 @@ struct NvidiaDlssRuntimeSettings {
 
 void RefreshNvidiaDlssRuntimeSettings();
 NvidiaDlssRuntimeSettings GetNvidiaDlssRuntimeSettings();
+
+/// The FSR output mode for this game session: fsr_quality while an FSR checkbox shows it (not on
+/// Windows), otherwise Automatic.
+FsrQuality GetFsrQuality();
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

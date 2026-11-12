@@ -217,6 +217,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "AMD when you ask. The files are AMD's, under AMD's licence. Without them, or if FSR 4 "
               "can't run, FSR 3.1 is used. Takes effect when a game starts."));
 #endif
+    INSERT(Settings, fsr_quality, tr("FSR output resolution:"),
+           tr("Applies only when FSR replaces a game's upscaler.\nAutomatic keeps the game's "
+              "render/output sizes. Native AA applies anti-aliasing at the game's render "
+              "resolution, then scales to its output; Ocarina's 1440p mode stays at 1440p instead "
+              "of reconstructing to 4K.\nExplicit modes only apply when the game's render and "
+              "output sizes match AMD's ratio for that mode; otherwise Automatic is used and the "
+              "fallback is logged. This does not change the game's render resolution. Takes "
+              "effect when a game starts."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
@@ -551,6 +559,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                            PAIR(NvidiaDlssQuality, Balanced, tr("Balanced")),
                            PAIR(NvidiaDlssQuality, Performance, tr("Performance")),
                            PAIR(NvidiaDlssQuality, UltraPerformance, tr("Ultra Performance"))}});
+    translations->insert({Settings::EnumMetadata<Settings::FsrQuality>::Index(),
+                          {PAIR(FsrQuality, Automatic, tr("Automatic (game resolution)")),
+                           PAIR(FsrQuality, Native, tr("Native AA")),
+                           PAIR(FsrQuality, Quality, tr("Quality")),
+                           PAIR(FsrQuality, Balanced, tr("Balanced")),
+                           PAIR(FsrQuality, Performance, tr("Performance")),
+                           PAIR(FsrQuality, UltraPerformance, tr("Ultra Performance"))}});
     translations->insert(
         {Settings::EnumMetadata<Settings::NvidiaDlssPreset>::Index(),
          {PAIR(NvidiaDlssPreset, M, tr("M (DLSS 4.5, default)")),

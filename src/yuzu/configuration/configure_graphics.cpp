@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <functional>
 #include <vector>
 #include <QBoxLayout>
@@ -223,6 +225,8 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
     std::vector<QWidget*> hold_api;
     QCheckBox* frame_gen_checkbox = nullptr;
     QCheckBox* nvidia_dlss_checkbox = nullptr;
+    // FSR's output resolution shows while either FSR checkbox is on (not on Windows).
+    std::array<QCheckBox*, 2> fsr_checkboxes{};
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
 #ifndef HAS_RESHADE
@@ -242,6 +246,11 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         // Official signed FFX DLLs are Windows-only; Linux's community
         // backend is available only in an explicitly enabled native build.
         if (setting->Id() == Settings::values.amd_fsr4.Id()) {
+            continue;
+        }
+#endif
+#ifdef _WIN32
+        if (setting->Id() == Settings::values.fsr_quality.Id()) {
             continue;
         }
 #endif
@@ -380,11 +389,15 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             hold_graphics.emplace(setting->Id(), group);
 #endif
         } else if (setting->Id() == Settings::values.ocarina_fsr.Id()) {
+            fsr_checkboxes[0] = widget->checkbox;
 #if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
             ocarina_fsr_checkbox = widget->checkbox;
 #endif
             hold_graphics.emplace(setting->Id(), widget);
         } else if (setting->Id() == Settings::values.amd_fsr4.Id()) {
+#ifndef _WIN32
+            fsr_checkboxes[1] = widget->checkbox;
+#endif
 #if defined(LICHII_LINUX_FSR412_BEAMNG) && !defined(_WIN32)
             // Native Linux uses an externally installed BeamNG-derived FSR
             // 4.1.2 implementation. Never show AMD's Windows-DLL downloader.
@@ -429,6 +442,22 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
                 [this](bool) { UpdateLinuxFsrSelection(); });
     }
 #endif
+
+    if (const auto it = hold_graphics.find(Settings::values.fsr_quality.Id());
+        it != hold_graphics.end()) {
+        QWidget* const fsr_quality = it->second;
+        const auto update = [fsr_checkboxes, fsr_quality] {
+            fsr_quality->setVisible(std::ranges::any_of(fsr_checkboxes, [](QCheckBox* checkbox) {
+                return checkbox != nullptr && checkbox->isChecked();
+            }));
+        };
+        update();
+        for (QCheckBox* const checkbox : fsr_checkboxes) {
+            if (checkbox != nullptr) {
+                connect(checkbox, &QCheckBox::toggled, fsr_quality, update);
+            }
+        }
+    }
 
     // Hide rather than disable, a disabled widget would read as using the global value
     if (frame_gen_checkbox != nullptr) {

@@ -31,6 +31,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2.h"
 #include "video_core/fsr.h"
+#include "video_core/fsr_mode.h"
 #include "video_core/render_trace.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/texture_cache/host_mip_limits.h"
@@ -1861,7 +1862,16 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
     if (!WantsTemporalUpscaleDepth()) {
         return false;
     }
-    const VkExtent2D extent = dst_framebuffer->RenderArea();
+    // Like NVIDIA DLSS's quality setting: native AA outputs at the render size, and an explicit
+    // mode that doesn't fit the game's sizes falls back to Automatic.
+    namespace FsrMode = VideoCommon::FsrMode;
+    const auto fsr_quality = Settings::GetFsrQuality();
+    const VkExtent2D game_extent = dst_framebuffer->RenderArea();
+    const auto fsr_mode = FsrMode::Select(fsr_quality, {render_size[0], render_size[1]},
+                                          {game_extent.width, game_extent.height});
+    const auto fsr_output = FsrMode::Output(fsr_mode, {render_size[0], render_size[1]},
+                                            {game_extent.width, game_extent.height});
+    const VkExtent2D extent{fsr_output.width, fsr_output.height};
     // A gap in the evaluations (a menu, a movie, a load) starts the history again.
     const auto now = std::chrono::steady_clock::now();
     const f32 frame_time_ms =
@@ -1930,7 +1940,14 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
         return false;
     }
     DrawUpscaledOutput(dst_framebuffer, fsr3_upscaler->OutputView(), fsr3_upscaler->OutputImage(),
-                       fsr3_upscaler->PointSampler());
+                       fsr_mode == Settings::FsrQuality::Native ? fsr3_upscaler->LinearSampler()
+                                                                : fsr3_upscaler->PointSampler());
+    if (static bool logged_fallback{}; !logged_fallback && fsr_mode != fsr_quality) {
+        logged_fallback = true;
+        LOG_INFO(Render_Vulkan, "FSR output resolution {} doesn't fit {}x{} -> {}x{}; using Automatic",
+                 Settings::CanonicalizeEnum(fsr_quality), render_size[0], render_size[1],
+                 game_extent.width, game_extent.height);
+    }
     static bool logged{};
     if (!logged) {
         logged = true;
@@ -4663,7 +4680,10 @@ f32 TextureCacheRuntime::OcarinaFsrLodBias() {
     if (!ocarina_fsr_lod_bias) {
         const bool ocarina = Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL;
         ocarina_fsr_lod_bias =
-            ocarina ? VideoCommon::OcarinaFsrLodBias(ResolveOcarinaUpscaler(device)) : 0.0f;
+            ocarina ? VideoCommon::OcarinaFsrLodBias(
+                          ResolveOcarinaUpscaler(device),
+                          Settings::GetFsrQuality() == Settings::FsrQuality::Native)
+                    : 0.0f;
     }
     return *ocarina_fsr_lod_bias;
 }
