@@ -6,6 +6,10 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Use the combined Mario Kart World and Ocarina of Time profile from upstream Lichii PR #1205
+  for Linux x86_64 PGO releases. Linux ARM retains `eglantine.profdata`; Windows and non-PGO
+  releases are unchanged. The RADV pipeline-cache experiment from PR #1103 is not included.
+
 - Bundle native Linux FSR 4.1.2 shaders, model weights, notices, and backend source in builds and
   x86_64 AppImages/tarballs. Resolve assets relative to the executable without requiring
   `LICHII_FSR412_ASSETS_DIR` or a separate asset installation.

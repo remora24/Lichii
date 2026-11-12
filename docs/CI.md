@@ -112,6 +112,10 @@ To retrain:
 
 `linux-x86_64-pgo` uses `lichii-linux.profdata`: the repository's `eglantine.profdata` (Mario Kart World) merged with about 2.5 minutes of Ocarina of Time gameplay in Kokiri Forest. Raw counts from the two runs differ by about 39x, so the Ocarina profile is weighted to count about as much as the Mario Kart one. `linux-aarch64-pgo` still uses `eglantine.profdata`.
 
+Profile source: [Lichii PR #1205](https://github.com/zortos293/Lichii/pull/1205), commit `05b4c337809cc403393df8134491581132ef4287`, by Liomar Oliveira. This is the same profile used by the local `lichii-test-c-oot` build; it was trained on upstream code, not this fork's FSR changes. Windows and non-PGO builds are unchanged.
+
+Before retraining, apply the training-only ZBIC exclusion from [PR #1204](https://github.com/zortos293/Lichii/pull/1204): compile `zbic_compression.cpp` with `-fno-profile-generate` as well as its existing `-fno-profile-instr-use`. That prerequisite is not needed to consume the committed profile.
+
 To retrain (clang of the same major as `PGO_LLVM_VERSION`):
 
 1. Configure a Release build as the `linux-x86_64` job does, adding `-fprofile-generate=<dir> -fprofile-update=atomic -mllvm -runtime-counter-relocation` to `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS`. Without `-runtime-counter-relocation` the link fails (`relocation R_X86_64_PC32 out of range` in dynarmic): the counters push `.rodata` out of reach.
